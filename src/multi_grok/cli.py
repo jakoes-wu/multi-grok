@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from typing import List, Optional, Sequence
 
 from . import __version__
@@ -20,10 +21,10 @@ from .config import (PROXY_INHERIT, SHARED_ITEM_NAMES, Account, Config, ConfigEr
                      load_config, normalize_proxy, parse_config, validate_env_key, validate_name,
                      validate_shared_item, validate_value)
 from .doctor import diagnose
-from .fsutil import KIND_DIR, entry_kind, expand, read_text
+from .fsutil import KIND_DIR, KIND_MISSING, entry_kind, expand, read_text
 from .launcher import build_env, launcher_path, trailing_option_warning
 from .lock import LockBusyError, WriteLock
-from .platform import is_supported
+from .platform import default_grok_home, is_supported
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -83,119 +84,341 @@ def _split_forwarded(argv: List[str]) -> tuple:
     return argv, None
 
 
+# (分组标题, [(命令显示名, 说明)])。显示名里逗号并列的每个词都必须是子命令。
+# 子命令不传 help=，顶层就不会把它们平铺成一列（与 multi-claude 的 --help 相同）。
+COMMAND_GROUPS = [
+    ("Getting started", [
+        ("add NAME", "register an account and write grok-NAME"),
+        ("login NAME", "run `grok login` inside one account"),
+        ("list", "show accounts, launchers and whether auth.json exists"),
+    ]),
+    ("Account settings", [
+        ("set NAME", "change proxy, isolate or sharing of an account"),
+        ("proxy, env, args", "set the proxy, extra variables or fixed arguments"),
+        ("rename, remove", "rename an account, or unregister it; the directory stays"),
+        ("export, import", "copy skills and related directories; no login or sessions"),
+    ]),
+    ("Everyday", [
+        ("usage", "run `grok usage`, or sum it with --history"),
+        ("sessions", "list sessions from each account's summary.json"),
+        ("route, which", "choose an account by directory for grok-auto"),
+        ("handoff", "copy one session directory to another account"),
+        ("mcp", "run `grok mcp` inside one account"),
+        ("run, path", "run a command as an account; print its directory"),
+        ("code", "open VS Code with one account's environment (experimental)"),
+    ]),
+    ("Setup and checks", [
+        ("init, apply", "set global paths; converge directories and launchers"),
+        ("doctor", "check PATH, directories, launchers and logins"),
+        ("completion", "print a shell completion script"),
+    ]),
+]
+
+# 顶层示例。(命令, 行尾说明)。说明可为空。
+TOP_EXAMPLES = [
+    ("multi-grok add home", ""),
+    ("multi-grok login home", ""),
+    ("multi-grok route ~/src/work work", ""),
+    ("multi-grok add --help", "details of one command"),
+]
+
+# 子命令 --help 第一段。文字与改帮助之前的 help= 相同。
+COMMAND_HELP = {
+    "init": "set the account root and launcher directory",
+    "add": "register an account and write grok-<name>",
+    "set": "change proxy, isolate or sharing of an account",
+    "remove": "unregister an account and delete its launcher; the directory stays",
+    "proxy": "set one account's proxy",
+    "env": "set extra environment variables",
+    "args": "replace fixed arguments; put them after --",
+    "apply": "converge the filesystem; with -f, replace accounts from a JSON file",
+    "list": "show accounts, launchers and whether auth.json exists",
+    "login": "run `grok login` inside one account",
+    "doctor": "check PATH, directories, launchers and logins",
+    "route": "choose an account by directory for grok-auto",
+    "which": "show which account grok-auto would use",
+    "rename": "rename an account and its launcher; the directory stays",
+    "run": "run a command with one account's environment: run NAME -- COMMAND",
+    "path": "print an account directory",
+    "mcp": "run `grok mcp ...` inside one account",
+    "usage": "run `grok usage` inside one account, or sum it with --history",
+    "sessions": "list sessions from each account's summary.json",
+    "handoff": "copy one session directory to another account",
+    "code": "open VS Code with one account's environment (experimental)",
+    "export": "write skills and related directories to a .tar.gz; no login or sessions",
+    "import": "import a file written by export into an existing account",
+    "completion": "print a shell completion script",
+}
+
+# 每个子命令自己的示例。只列 README 和当前实现里已经成立的用法。
+COMMAND_EXAMPLES = {
+    "init": (
+        "multi-grok init",
+        "multi-grok init --root ~/.grok-accounts --bin-dir ~/.local/bin",
+    ),
+    "add": (
+        "multi-grok add home",
+        "multi-grok add work --proxy 7890",
+        "multi-grok add work --shared ~/.grok-shared --adopt",
+    ),
+    "set": (
+        "multi-grok set home --proxy off",
+        "multi-grok set home --shared ~/.grok-shared",
+        "multi-grok set home --no-shared",
+    ),
+    "remove": (
+        "multi-grok remove work",
+        "multi-grok remove work --dry-run",
+    ),
+    "proxy": (
+        "multi-grok proxy work 7890",
+        "multi-grok proxy work off",
+        "multi-grok proxy work inherit",
+    ),
+    "env": (
+        "multi-grok env --defaults LANG=C",
+        "multi-grok env work GROK_SANDBOX=off --unset LANG",
+    ),
+    "args": (
+        "multi-grok args work -- --permission-mode acceptEdits",
+        "multi-grok args --defaults -- --minimal",
+        "multi-grok args work --",
+    ),
+    "apply": (
+        "multi-grok apply",
+        "multi-grok apply -f examples/config.example.json",
+        "multi-grok apply --dry-run",
+    ),
+    "list": (
+        "multi-grok list",
+        "multi-grok list --names",
+        "multi-grok list --json",
+    ),
+    "login": (
+        "multi-grok login home",
+        "multi-grok login home -- --oauth",
+    ),
+    "doctor": (
+        "multi-grok doctor",
+        "multi-grok doctor --json",
+    ),
+    "route": (
+        "multi-grok route ~/src/work work",
+        "multi-grok route --default home",
+        "multi-grok route ~/src/work --remove",
+        "multi-grok route --no-default",
+    ),
+    "which": (
+        "multi-grok which",
+        "multi-grok which ~/src/work",
+    ),
+    "rename": (
+        "multi-grok rename home personal",
+    ),
+    "run": (
+        "multi-grok run home -- grok --version",
+        "multi-grok run -- grok",
+    ),
+    "path": (
+        "multi-grok path home",
+    ),
+    "mcp": (
+        "multi-grok mcp home list",
+    ),
+    "usage": (
+        "multi-grok usage home SESSION_ID",
+        "multi-grok usage home SESSION_ID 1",
+        "multi-grok usage home --history --days 7",
+        "multi-grok usage --history --by model --json",
+    ),
+    "sessions": (
+        "multi-grok sessions",
+        "multi-grok sessions home --grep launcher --cmd",
+        "multi-grok sessions --json",
+    ),
+    "handoff": (
+        "multi-grok handoff work --from home --session SESSION_ID",
+        "multi-grok handoff work --from home --session SESSION_ID --force",
+    ),
+    "code": (
+        "multi-grok code home",
+        "multi-grok code home ~/src/work",
+    ),
+    "export": (
+        "multi-grok export home skills.tar.gz",
+    ),
+    "import": (
+        "multi-grok import skills.tar.gz work",
+        "multi-grok import skills.tar.gz work --force",
+    ),
+    "completion": (
+        "multi-grok completion bash",
+        "multi-grok completion zsh",
+        "multi-grok completion fish",
+    ),
+}
+
+
+def grouped_command_names() -> List[str]:
+    """COMMAND_GROUPS 里出现的全部子命令名（去掉 NAME 之类的占位）。"""
+    names = []
+    for _title, items in COMMAND_GROUPS:
+        for shown, _text in items:
+            for part in shown.split(","):
+                names.append(part.split()[0])
+    return names
+
+
+def _help_epilog() -> str:
+    lines = []
+    for title, items in COMMAND_GROUPS:
+        lines.append("{}:".format(title))
+        for shown, text in items:
+            lines.append("  {:<18}{}".format(shown, text))
+        lines.append("")
+    lines.append("Examples:")
+    for command, text in TOP_EXAMPLES:
+        lines.append("  {:<36}{}".format(command, text).rstrip())
+    return "\n".join(lines)
+
+
+def _command_examples(name: str) -> str:
+    return "Examples:\n" + "\n".join("  {}".format(line) for line in COMMAND_EXAMPLES[name])
+
+
+def _sub(subparsers: argparse._SubParsersAction, name: str, parents=None) -> argparse.ArgumentParser:
+    """建一个不在顶层平铺的子命令。用途在 description，示例在 epilog。"""
+    kwargs = {
+        "description": COMMAND_HELP[name],
+        "epilog": _command_examples(name),
+        "formatter_class": argparse.RawDescriptionHelpFormatter,
+    }
+    if parents is not None:
+        kwargs["parents"] = parents
+    return subparsers.add_parser(name, **kwargs)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multi-grok",
-        description="Keep one Grok environment per account under ~/.grok-accounts, "
+        description="Keep one Grok environment per account under ~/.grok-accounts,\n"
                     "and start it with grok-<name> (for example grok-home).",
+        epilog=_help_epilog(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version="multi-grok {}".format(__version__))
-    sub = parser.add_subparsers(dest="command")
+    # help 写在子解析器动作上，不写在每个子命令上，顶层就不会再平铺一列。
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND", help="one of the commands listed below")
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--dry-run", action="store_true", help="print actions and write nothing")
     common.add_argument("--verbose", action="store_true", help="also print unchanged paths")
 
-    init = sub.add_parser("init", parents=[common], help="set the account root and launcher directory")
+    init = _sub(sub, "init", parents=[common])
     init.add_argument("--root", help="directory that holds one subdirectory per account "
                                       "(default: ~/.grok-accounts)")
     init.add_argument("--bin-dir", help="where grok-<name> commands are written (default: ~/.local/bin)")
     init.add_argument("--shared-dir", help="directory whose items can be linked into accounts")
     init.add_argument("--shared-items", help="comma-separated items to share (skills, commands, agents, ...)")
 
-    add = sub.add_parser("add", parents=[common], help="register an account and write grok-<name>")
+    add = _sub(sub, "add", parents=[common])
     _add_account_flags(add)
     add.add_argument("--adopt", action="store_true",
                      help="record existing links that already point at the shared items")
 
-    set_cmd = sub.add_parser("set", parents=[common], help="change proxy, isolate or sharing of an account")
+    set_cmd = _sub(sub, "set", parents=[common])
     _add_account_flags(set_cmd)
 
-    remove = sub.add_parser("remove", parents=[common],
-                            help="unregister an account and delete its launcher; the directory stays")
+    remove = _sub(sub, "remove", parents=[common])
     remove.add_argument("name")
 
-    proxy = sub.add_parser("proxy", parents=[common], help="set one account's proxy")
+    proxy = _sub(sub, "proxy", parents=[common])
     proxy.add_argument("name")
     proxy.add_argument("value", help="inherit, off, a port, or an http(s) URL")
 
-    env = sub.add_parser("env", parents=[common], help="set extra environment variables")
+    env = _sub(sub, "env", parents=[common])
     env.add_argument("name", nargs="?", help="account name; omit with --defaults")
     env.add_argument("--defaults", action="store_true", help="change the variables inherited by every account")
     env.add_argument("--unset", action="append", default=[], help="remove one variable; repeatable")
     env.add_argument("pairs", nargs="*", help="KEY=value")
 
-    args_cmd = sub.add_parser("args", parents=[common], help="replace fixed arguments; put them after --")
+    args_cmd = _sub(sub, "args", parents=[common])
     args_cmd.add_argument("name", nargs="?", help="account name; omit with --defaults")
     args_cmd.add_argument("--defaults", action="store_true")
 
-    apply_cmd = sub.add_parser("apply", parents=[common],
-                               help="converge the filesystem; with -f, replace accounts from a JSON file")
+    apply_cmd = _sub(sub, "apply", parents=[common])
     apply_cmd.add_argument("-f", "--file", help="JSON file in the same shape as config.json")
 
-    listing = sub.add_parser("list", help="show accounts, launchers and whether auth.json exists")
+    listing = _sub(sub, "list")
     listing.add_argument("--json", action="store_true", help="print the same facts as JSON")
     listing.add_argument("--names", action="store_true", help="print only account names")
-    login = sub.add_parser("login", help="run `grok login` inside one account")
+    login = _sub(sub, "login")
     login.add_argument("name")
-    doctor = sub.add_parser("doctor", help="check PATH, directories, launchers and logins")
+    doctor = _sub(sub, "doctor")
     doctor.add_argument("--json", action="store_true")
 
-    route = sub.add_parser("route", parents=[common], help="choose an account by directory for grok-auto")
+    route = _sub(sub, "route", parents=[common])
     route.add_argument("path", nargs="?", help="directory, or omit when using --default")
     route.add_argument("name", nargs="?", help="account that grok-auto should run in that directory")
     route.add_argument("--default", help="account used when no directory rule matches")
     route.add_argument("--no-default", action="store_true", help="clear the default account")
     route.add_argument("--remove", action="store_true", help="remove the rule for this directory")
 
-    which = sub.add_parser("which", help="show which account grok-auto would use")
+    which = _sub(sub, "which")
     which.add_argument("path", nargs="?", help="directory (default: the current directory)")
 
-    rename = sub.add_parser("rename", parents=[common], help="rename an account and its launcher; the directory stays")
+    rename = _sub(sub, "rename", parents=[common])
     rename.add_argument("old")
     rename.add_argument("new")
 
-    run_cmd = sub.add_parser("run", help="run a command with one account's environment: run NAME -- COMMAND")
+    run_cmd = _sub(sub, "run")
     run_cmd.add_argument("name", nargs="?", help="account; omit to use the grok-auto choice for this directory")
 
-    path_cmd = sub.add_parser("path", help="print an account directory")
+    path_cmd = _sub(sub, "path")
     path_cmd.add_argument("name")
 
-    mcp = sub.add_parser("mcp", help="run `grok mcp ...` inside one account")
+    mcp = _sub(sub, "mcp")
     mcp.add_argument("name")
 
-    usage = sub.add_parser("usage", help="run `grok usage` inside one account")
-    usage.add_argument("name")
+    usage = _sub(sub, "usage")
+    usage.add_argument("name", nargs="?", help="account; with --history, omit to include every account and ~/.grok")
     usage.add_argument("session", nargs="?", help="session id")
     usage.add_argument("turn", nargs="?", help="turn number")
+    usage.add_argument("--history", action="store_true",
+                       help="sum `grok usage` JSON for sessions in this account")
+    usage.add_argument("--days", type=int, default=None,
+                       help="with --history, only sessions updated in the last N days (default 7; 0 means all)")
+    usage.add_argument("--by", choices=("day", "model"), default=None,
+                       help="with --history, group by day or model (default day)")
+    usage.add_argument("--json", action="store_true", help="with --history, print the totals as JSON")
 
-    sessions = sub.add_parser("sessions", help="list sessions from each account's summary.json")
+    sessions = _sub(sub, "sessions")
     sessions.add_argument("name", nargs="?", help="one account; omit for every account")
     sessions.add_argument("--grep", help="match account, id, directory, title or model")
     sessions.add_argument("--limit", type=int, default=50)
     sessions.add_argument("--cmd", action="store_true", help="also print the command that resumes the session")
     sessions.add_argument("--json", action="store_true")
 
-    handoff = sub.add_parser("handoff", help="copy one session directory to another account")
+    handoff = _sub(sub, "handoff")
     handoff.add_argument("target")
     handoff.add_argument("--from", dest="source")
     handoff.add_argument("--session", required=True)
     handoff.add_argument("--force", action="store_true")
 
-    code = sub.add_parser("code", help="open VS Code with one account's environment (experimental)")
+    code = _sub(sub, "code")
     code.add_argument("name")
     code.add_argument("path", nargs="?")
 
-    export_cmd = sub.add_parser("export", help="write skills and related directories to a .tar.gz; no login or sessions")
+    export_cmd = _sub(sub, "export")
     export_cmd.add_argument("name")
     export_cmd.add_argument("file")
 
-    import_cmd = sub.add_parser("import", help="import a file written by export into an existing account")
+    import_cmd = _sub(sub, "import")
     import_cmd.add_argument("file")
     import_cmd.add_argument("name")
     import_cmd.add_argument("--force", action="store_true", help="replace an existing directory after renaming it aside")
 
-    completion = sub.add_parser("completion", help="print a shell completion script")
+    completion = _sub(sub, "completion")
     completion.add_argument("shell", choices=("bash", "zsh", "fish"))
     return parser
 
@@ -498,8 +721,10 @@ def cmd_list(args: argparse.Namespace) -> int:
         print("no accounts. Create one with: multi-grok add home")
         return EXIT_OK
     for row in rows:
+        shown = dict(row)
+        shown["last"] = row.get("last") or "-"
         print("{name}  launcher={launcher}  login={login}  proxy={proxy}  isolate={isolate}  "
-              "shared={shared}  dir={dir}".format(**row))
+              "shared={shared}  last={last}  dir={dir}".format(**shown))
     if payload["router"] is not None:
         print("router={}  default={}  rules={}".format(
             payload["router"], config.route_default or "-", len(config.route_rules)))
@@ -763,38 +988,223 @@ def cmd_mcp(name: str, extra: List[str]) -> int:
 
 
 def cmd_usage(args: argparse.Namespace, forwarded: Optional[List[str]]) -> int:
+    if args.history:
+        return _cmd_usage_history(args, forwarded)
+    if args.days is not None or args.by is not None or args.json:
+        error("--days, --by and --json require --history")
+        return EXIT_USAGE
     extra = list(forwarded or [])
     if not extra and args.session:
         extra = [args.session] + ([args.turn] if args.turn else [])
-    if not extra:
+    if not args.name or not extra:
         error("pass a session id: multi-grok usage NAME SESSION")
         return EXIT_USAGE
     # 用量以 `grok usage` 为准（用户指南 17-sessions.md）。这里不读 signals.json。
     return _exec_grok(args.name, ["usage"] + extra, include_fixed=False)
 
 
+def _cmd_usage_history(args: argparse.Namespace, forwarded: Optional[List[str]]) -> int:
+    """对每个入选会话调用一次 `grok usage`，只加总数字。失败时不打印原始输出。"""
+    from . import sessions as session_index
+    from .usage_report import UsageReportError, combine, fold_payload, format_counts, prepare_rows
+    if forwarded or args.session or args.turn:
+        error("--history does not take a session id; run `multi-grok usage NAME --history`")
+        return EXIT_USAGE
+    days = 7 if args.days is None else args.days
+    if days < 0:
+        error("--days must be 0 or greater")
+        return EXIT_USAGE
+    by = args.by or "day"
+    config, _exists = load_config()
+    if shutil.which("grok") is None:
+        error("grok not found in PATH")
+        return 127
+    sources = _history_sources(config, args.name)
+    if sources is None:
+        return EXIT_ERROR
+    # 用户指南和 `grok usage --help` 都没有写它是否只看当前目录。这里不改 cwd。
+    warn("grok usage ran with this account's GROK_HOME; the working directory was not changed. "
+         "The user guide does not say whether `grok usage` is limited to the current directory.")
+    now = datetime.now(timezone.utc)
+    failures: List[str] = []
+    payloads = []
+    for label, directory, account in sources:
+        if account is None:
+            env = build_env(dict(os.environ), directory, PROXY_INHERIT, {})
+        else:
+            env = build_env(dict(os.environ), directory, account.proxy, config.effective_env(account))
+        rows = session_index.list_account(label, directory)
+        kept, skipped, notes = prepare_rows(rows, days, now)
+        for note in notes:
+            warn("{}: {}".format(label, note))
+        parts = []
+        for row in kept:
+            session_id = row.get("id") or ""
+            try:
+                session_index._check_id(session_id)
+            except session_index.SessionError:
+                failures.append("invalid session id")
+                continue
+            if len(session_id) > 200 or "\n" in session_id or "\r" in session_id:
+                failures.append("invalid session id")
+                continue
+            code, body = _capture_usage(env, session_id)
+            if code != 0:
+                failures.append("grok usage {} exited {}".format(session_id, code))
+                continue
+            try:
+                parsed = json.loads(body)
+                parts.append(fold_payload(parsed, row.get("updated") or "", by))
+            except (ValueError, UsageReportError):
+                failures.append("grok usage {} did not return a JSON object".format(session_id))
+        report = combine(parts)
+        if report["partial"]:
+            warn("{}: usage is marked partial or incomplete; the totals are still printed".format(label))
+        payloads.append({
+            "account": label,
+            "by": by,
+            "days": days,
+            "sessions": len(kept),
+            "skippedUndated": skipped,
+            "partial": report["partial"],
+            "cwdUnverified": True,
+            "rows": report["rows"],
+            "total": report["total"],
+        })
+    if failures:
+        for message in failures:
+            error(message)
+        return EXIT_ERROR
+    if args.json:
+        body = payloads[0] if len(payloads) == 1 else payloads
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        return EXIT_OK
+    for payload in payloads:
+        print("{account}  by={by}  days={days}  sessions={sessions}  skippedUndated={skippedUndated}".format(**payload))
+        if not payload["rows"]:
+            print("no usage")
+            continue
+        for row in payload["rows"]:
+            print(format_counts(row))
+        print(format_counts(payload["total"]))
+    return EXIT_OK
+
+
+def _capture_usage(env: dict, session_id: str) -> tuple:
+    """运行 `grok usage <id>`。标准错误丢弃，避免把对话文本带回输出。"""
+    proc = subprocess.run(
+        ["grok", "usage", session_id],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        body = proc.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        body = ""
+    return proc.returncode, body
+
+
+def _history_sources(config, name: Optional[str]):
+    """历史用量的数据目录。未登记的 default 是 ~/.grok，不写进 config.json。
+
+    返回 [(显示名, 目录, account 或 None)]。用法错误时已经打印原因，返回 None。
+    """
+    if name:
+        account = config.find(name)
+        if account is not None:
+            directory = account_dir(config, account.name)
+            if entry_kind(directory) != KIND_DIR:
+                error("account directory is not a real directory; run `multi-grok apply`")
+                return None
+            return [(account.name, directory, account)]
+        if name.casefold() == "default":
+            home = expand(default_grok_home())
+            if entry_kind(home) != KIND_DIR:
+                error("~/.grok is not a real directory ({}); default usage was not read".format(entry_kind(home)))
+                return None
+            return [("default", home, None)]
+        error("unknown account {!r}".format(name))
+        return None
+    sources = []
+    for account_name in sorted(config.accounts):
+        directory = account_dir(config, account_name)
+        if entry_kind(directory) != KIND_DIR:
+            error("account directory is not a real directory; run `multi-grok apply`")
+            return None
+        sources.append((account_name, directory, config.accounts[account_name]))
+    if not _default_already_listed(config):
+        home = expand(default_grok_home())
+        kind = entry_kind(home)
+        if kind == KIND_DIR:
+            sources.append(("default", home, None))
+        elif kind != KIND_MISSING:
+            warn("~/.grok is not a real directory ({}); default usage was not read".format(kind))
+    if not sources:
+        error("no accounts. Create one with: multi-grok add home")
+        return None
+    return sources
+
+
+def _default_already_listed(config) -> bool:
+    """已有名叫 default 的账号，或某个账号目录就是 ~/.grok 时，不再追加第二份。"""
+    if config.find("default") is not None:
+        return True
+    home = os.path.normpath(expand(default_grok_home()))
+    for name in config.accounts:
+        if os.path.normpath(account_dir(config, name)) == home:
+            return True
+    return False
+
+
+def _builtin_default_rows(session_index, required: bool):
+    """只读 ~/.grok 的 summary.json。软链不跟随。目录不存在时，列出全部账号则静默跳过。"""
+    home = expand(default_grok_home())
+    kind = entry_kind(home)
+    if kind == KIND_DIR:
+        return session_index.list_account("default", home), None
+    if not required and kind == KIND_MISSING:
+        return [], None
+    return [], "~/.grok is not a real directory ({}); default sessions were not listed".format(kind)
+
+
 def cmd_sessions(args: argparse.Namespace) -> int:
     from . import sessions as session_index
     config, _exists = load_config()
+    rows = []
     if args.name:
         account = config.find(args.name)
-        if account is None:
+        if account is not None:
+            rows.extend(session_index.list_account(account.name, account_dir(config, account.name)))
+        elif args.name.casefold() == "default":
+            loaded, problem = _builtin_default_rows(session_index, required=True)
+            if problem:
+                error(problem)
+                return EXIT_ERROR
+            rows.extend(loaded)
+        else:
             error("unknown account {!r}".format(args.name))
             return EXIT_ERROR
-        selected = [account]
     else:
-        selected = [config.accounts[name] for name in sorted(config.accounts)]
-    rows = []
-    for account in selected:
-        rows.extend(session_index.list_account(account.name, account_dir(config, account.name)))
+        for name in sorted(config.accounts):
+            rows.extend(session_index.list_account(name, account_dir(config, name)))
+        if not _default_already_listed(config):
+            loaded, problem = _builtin_default_rows(session_index, required=False)
+            if problem:
+                warn(problem)
+            else:
+                rows.extend(loaded)
     if args.grep:
         rows = [row for row in rows if session_index.matches(row, args.grep)]
     rows.sort(key=lambda row: row.get("updated") or "", reverse=True)
     if args.limit is not None and args.limit >= 0:
         rows = rows[:args.limit]
+    plain_default = config.find("default") is None
     for row in rows:
-        row["cmd"] = "cd {} && grok-{} --resume {}".format(
-            _shell_quote(row["cwd"] or "."), row["account"], _shell_quote(row["id"]))
+        # 未登记的 ~/.grok 仍由 PATH 上的 grok 打开，没有 grok-default 这个启动器。
+        binary = "grok" if plain_default and row["account"] == "default" else "grok-{}".format(row["account"])
+        row["cmd"] = "cd {} && {} --resume {}".format(
+            _shell_quote(row["cwd"] or "."), binary, _shell_quote(row["id"]))
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return EXIT_OK

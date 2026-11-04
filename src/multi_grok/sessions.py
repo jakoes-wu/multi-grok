@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import stat
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from .fsutil import KIND_DIR, KIND_FILE, KIND_MISSING, entry_kind
@@ -170,6 +171,63 @@ def _read_summary(account: str, session_path: str, summary_path: str, fallback_i
 def _check_id(session_id: str) -> None:
     if not session_id or session_id in (".", "..") or "/" in session_id or "\\" in session_id or "\0" in session_id:
         raise SessionError("invalid session id {!r}".format(session_id))
+
+
+def parse_stamp(value: object) -> Optional[datetime]:
+    """把时间字符串解析成 UTC。解析不了就返回 None，让列表继续。
+
+    Python 3.8 的 fromisoformat 不接受结尾的 Z，也不接受超过 6 位的小数秒。
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    dot = text.find(".")
+    if dot != -1:
+        head = text[:dot]
+        tail = text[dot + 1:]
+        digits: List[str] = []
+        index = 0
+        while index < len(tail) and tail[index].isdigit() and len(digits) < 6:
+            digits.append(tail[index])
+            index += 1
+        while index < len(tail) and tail[index].isdigit():
+            index += 1
+        fraction = "." + "".join(digits) if digits else ""
+        text = head + fraction + tail[index:]
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def latest_updated(rows: List[dict]) -> str:
+    """最近一次 updated_at 的原文。没有会话时返回空字符串。
+
+    能解析的时间按 UTC 比较。一条都解析不了时，才用非空字符串的字典序。
+    """
+    best_stamp: Optional[datetime] = None
+    best_text = ""
+    fallback = ""
+    for row in rows:
+        text = row.get("updated") or ""
+        if not isinstance(text, str) or not text:
+            continue
+        if text > fallback:
+            fallback = text
+        stamp = parse_stamp(text)
+        if stamp is None:
+            continue
+        if best_stamp is None or stamp > best_stamp or (stamp == best_stamp and text > best_text):
+            best_stamp = stamp
+            best_text = text
+    return best_text or fallback
 
 
 def matches(row: Dict[str, str], needle: str) -> bool:

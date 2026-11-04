@@ -2,7 +2,7 @@
 
 > 2026-11-03 注记：用户要求参照 multi-claude，在 `/Users/jakoes/VSCodeProjects/ai/multi-grok` 做成开源项目。账号目录为 `$HOME/.grok-accounts/<账号名>`，启动命令为 `grok-<账号名>`（例：`grok-home`）。本文与 v0.1.0 代码一起落地。
 >
-> 2026-11-03 补充：v0.2 增加了当时列为非目标的共享软链、目录路由、会话列表与交接、`grok usage` 转发。那些能力的边界在 `docs/feature/feature-everyday-commands.md`。下文第 2 节的非目标是 v0.1 的范围。
+> 2026-11-03 补充：v0.2 增加了当时列为非目标的共享软链、目录路由、会话列表与交接、`grok usage` 转发。那些能力的边界在 `docs/feature/feature-everyday-commands.md`。下文第 2 节的非目标是 v0.1 的范围。v0.3 的本地报表在 `docs/feature/feature-local-reports.md`。`--help` 的分组和示例在 `docs/feature/feature-help-examples.md`。
 
 ## 1. 背景
 

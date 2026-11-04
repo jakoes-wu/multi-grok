@@ -1,6 +1,8 @@
 # multi-grok：日常命令
 
 > 2026-11-03 注记：与 v0.2.0 代码一起落地。配置版本仍是 1。本机安装在测试通过之后执行。提交与推送未做。
+>
+> 2026-11-03 补充：v0.3 的 `default` 会话、`last`、`usage --history` 和 PATH 遮挡警告在 `docs/feature/feature-local-reports.md`。下文不改写 v0.2 的范围。
 
 ## 1. 背景
 

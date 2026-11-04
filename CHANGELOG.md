@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+Local reports. Nothing new is stored in `config.json`.
+
+- `sessions` also lists `~/.grok` as `default`, unless an account is already named `default` or an account directory is already `~/.grok`. `--cmd` for that row uses `grok --resume`. A symlinked `~/.grok` is skipped.
+- `list` shows `last=`, the newest `summary.json` `updated_at` for that registered account. `--names` stays names only.
+- `usage [<name>] --history [--days N] [--by day|model] [--json]` runs `grok usage <id>` and sums the numbers. It does not print turn text. `--days` defaults to 7. `0` means no time cutoff. With no name, every registered account is included, and so is `~/.grok` under the label `default`.
+- `doctor` warns when another `grok-<name>` is earlier on `PATH`. The warning does not change a successful exit code.
+- `--help` groups the commands and ends with examples. Each command's own `--help` keeps its description and lists that command's examples.
+
+`grok usage` is started with that account's `GROK_HOME` and the current directory unchanged. The user guide does not say whether the command is limited to the current directory.
+
 ## 0.2.0
 
 Commands that map onto a documented Grok behavior:

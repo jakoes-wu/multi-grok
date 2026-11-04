@@ -134,15 +134,16 @@ multi-grok args work -- --permission-mode acceptEdits
 | `env (<名称> \| --defaults) [键=值 ...] [--unset 键]` | 设置额外环境变量 |
 | `args (<名称> \| --defaults) -- [参数 ...]` | 整体替换固定参数 |
 | `apply [-f 文件]` | 按当前配置或一份 JSON 把目录和启动命令收敛到一致 |
-| `list [--json \| --names]` | 只读列出状态。不带子命令时也是它 |
-| `doctor [--json]` | 检查 `PATH`、目录、启动命令、路由脚本和 `auth.json` 的类型 |
+| `list [--json \| --names]` | 只读列出状态，含从 `summary.json` 取出的 `last=`。不带子命令时也是它 |
+| `doctor [--json]` | 检查 `PATH`、目录、启动命令、路由脚本和 `auth.json` 的类型。PATH 里更靠前的 `grok-<名称>` 只是警告 |
 | `path <名称>` | 打印账号目录 |
 | `run [<名称>] -- <命令...>` | 用该账号的环境运行一条命令。必须带 `--` |
 | `route <目录> <名称>` | 让 `grok-auto` 在这个目录及其子目录里使用该账号 |
 | `which [目录]` | 打印 `grok-auto` 会选中的账号 |
 | `mcp <名称> [grok mcp 的参数...]` | 在该账号里执行 `grok mcp` |
 | `usage <名称> <会话 id> [轮次]` | 在该账号里执行 `grok usage` |
-| `sessions [<名称>] [--grep 文本] [--cmd] [--json]` | 只从 `summary.json` 列会话 |
+| `usage [<名称>] --history [--days N] [--by day\|model] [--json]` | 把 `grok usage` 里的 token 和费用数字加总。不写名称时包含每个已登记账号和 `~/.grok`。默认最近 7 天 |
+| `sessions [<名称>] [--grep 文本] [--cmd] [--json]` | 只从 `summary.json` 列会话。不写名称时，`~/.grok` 会以 `default` 出现 |
 | `handoff <目标> [--from 名称] --session ID [--force]` | 复制一个会话目录。不改写 `summary.json` |
 | `export <名称> <文件>` / `import <文件> <名称> [--force]` | 打包或还原技能等共享目录。不含登录，不含会话 |
 | `completion bash\|zsh\|fish` | 打印补全脚本。不改 shell 启动文件 |
@@ -185,10 +186,13 @@ multi-grok which
 ```sh
 multi-grok sessions --grep launcher --cmd
 multi-grok usage home 会话ID
+multi-grok usage home --history --days 7
 multi-grok handoff work --from home --session 会话ID
 ```
 
-`--cmd` 会带上 `cd` 和 `grok-<名称> --resume`，因为 Grok 按当前目录匹配恢复用的标题。交接只复制会话目录，不改 `summary.json`。复制过去之后能否 `--resume`，以 Grok 自己的检查为准；用户指南没有写换一个 `GROK_HOME` 之后仍能恢复。
+`--cmd` 会带上 `cd` 和 `grok-<名称> --resume`，因为 Grok 按当前目录匹配恢复用的标题。`~/.grok` 里的会话标成 `default`，这一行的 `--cmd` 用的是不带名字的 `grok`。交接只复制会话目录，不改 `summary.json`。复制过去之后能否 `--resume`，以 Grok 自己的检查为准；用户指南没有写换一个 `GROK_HOME` 之后仍能恢复。
+
+`usage --history` 对每个会话调用一次 `grok usage`，只加总数字，不打印对话。工作目录保持不变。用户指南没有写 `grok usage` 是否只看当前目录。
 
 补全脚本只打印，不写入启动文件：
 
@@ -199,7 +203,7 @@ multi-grok completion zsh
 ## 不做的事
 
 - 不移动 `~/.grok`，也不把它换成软链。沙箱拒绝软链形式的 `GROK_HOME`。
-- 不查询 5 小时或 7 天额度。状态栏载荷里有本次会话的费用和上下文，用户指南写明没有额度摘要。`usage` 转给 `grok usage`。
+- 不查询 5 小时或 7 天额度。状态栏载荷里有本次会话的费用和上下文，用户指南写明没有额度摘要。`usage 名称 会话` 转给 `grok usage`。`usage 名称 --history` 只加总那份本地 JSON。
 - 不读取 `auth.json`。
 - 用户指南写了技能的 `SKILL.md` 可以是软链，没有写整个 `skills/` 目录是软链时怎么发现技能。共享条目仍使用这种目录软链，这样不必改写 `config.toml`。通过这层软链能不能被 Grok 扫到，尚未验证。
 
@@ -209,7 +213,7 @@ multi-grok completion zsh
 python3 -m unittest discover -s tests -v
 ```
 
-方案说明在 [docs/feature/feature-account-manager.md](docs/feature/feature-account-manager.md) 和 [docs/feature/feature-everyday-commands.md](docs/feature/feature-everyday-commands.md)。
+方案说明在 [docs/feature/feature-account-manager.md](docs/feature/feature-account-manager.md)、[docs/feature/feature-everyday-commands.md](docs/feature/feature-everyday-commands.md) 和 [docs/feature/feature-help-examples.md](docs/feature/feature-help-examples.md)。
 
 ## 许可
 

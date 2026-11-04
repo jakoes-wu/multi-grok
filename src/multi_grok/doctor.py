@@ -8,7 +8,7 @@ from .accounts import describe, directory_mode, plan
 from .actions import CONFLICT, has_conflict
 from .config import Config, config_path
 from .fsutil import expand
-from .launcher import trailing_option_warning
+from .launcher import LAUNCHER_PREFIX, launcher_path, trailing_option_warning
 from .platform import ISOLATION_ENV, is_supported
 from .routes import router_status
 
@@ -57,6 +57,11 @@ def diagnose(config: Config) -> Tuple[List[str], List[str]]:
             problems.append("{} is readable by group or others; run chmod 700 {}".format(row["dir"], row["dir"]))
         if row["launcher"] == "conflict":
             problems.append("launcher for {} is not the managed grok-{} command".format(row["name"], row["name"]))
+        # which 找不到时，上面的 bin 目录检查已经报过。这里只报“更靠前的同名文件”。
+        expected = launcher_path(config.bin_dir, row["name"])
+        found = shutil.which(LAUNCHER_PREFIX + row["name"])
+        if found is not None and os.path.realpath(found) != os.path.realpath(expected):
+            warnings.append("{} comes first on PATH and hides {}".format(found, expected))
         if row["login"] == "symlink":
             problems.append("{} auth.json is a symlink; it can point at another account's login".format(row["name"]))
         elif row["login"] == "missing":

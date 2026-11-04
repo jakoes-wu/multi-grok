@@ -134,15 +134,16 @@ A login that already exists in `~/.grok` does not show up in `grok-home`. `home`
 | `env (<name> \| --defaults) [KEY=value ...] [--unset KEY]` | Set extra environment variables. |
 | `args (<name> \| --defaults) -- [args ...]` | Replace the fixed arguments. |
 | `apply [-f FILE]` | Make directories and launchers match the current config, or a JSON file. |
-| `list [--json \| --names]` | Read-only status. This is also the default when you run `multi-grok` alone. |
-| `doctor [--json]` | Check `PATH`, directories, launchers, the router, and the type of `auth.json`. |
+| `list [--json \| --names]` | Read-only status, including `last=` from `summary.json`. This is also the default when you run `multi-grok` alone. |
+| `doctor [--json]` | Check `PATH`, directories, launchers, the router, and the type of `auth.json`. A `grok-<name>` earlier on `PATH` is a warning. |
 | `path <name>` | Print the account directory. |
 | `run [<name>] -- <command...>` | Run a command with that account's environment. `--` is required. |
 | `route <dir> <name>` | Send `grok-auto` to that account for this directory and its children. |
 | `which [dir]` | Print the account `grok-auto` would pick. |
 | `mcp <name> [grok mcp args...]` | Run `grok mcp` inside that account. |
 | `usage <name> <session-id> [turn]` | Run `grok usage` inside that account. |
-| `sessions [<name>] [--grep TEXT] [--cmd] [--json]` | List sessions from `summary.json` only. |
+| `usage [<name>] --history [--days N] [--by day\|model] [--json]` | Sum token and cost numbers from `grok usage`. Omit the name to include every account and `~/.grok`. Default window is 7 days. |
+| `sessions [<name>] [--grep TEXT] [--cmd] [--json]` | List sessions from `summary.json` only. With no name, `~/.grok` is included as `default`. |
 | `handoff <target> [--from NAME] --session ID [--force]` | Copy one session directory. It does not rewrite `summary.json`. |
 | `export <name> <file>` / `import <file> <name> [--force]` | Pack or unpack skills and the other shared directories. No login, no sessions. |
 | `completion bash\|zsh\|fish` | Print a completion script. Nothing is written to your shell startup file. |
@@ -185,10 +186,13 @@ List sessions across accounts, without opening the conversation log:
 ```sh
 multi-grok sessions --grep launcher --cmd
 multi-grok usage home SESSION_ID
+multi-grok usage home --history --days 7
 multi-grok handoff work --from home --session SESSION_ID
 ```
 
-`--cmd` prints `cd` and `grok-<name> --resume`, because Grok matches a resume title in the current directory. Handoff copies the session directory and leaves `summary.json` unchanged. Whether Grok then resumes that copy is Grok's own check; the user guide does not promise a resume after the files move to another `GROK_HOME`.
+`--cmd` prints `cd` and `grok-<name> --resume`, because Grok matches a resume title in the current directory. Sessions that live in `~/.grok` are labeled `default`, and that `--cmd` line uses plain `grok`. Handoff copies the session directory and leaves `summary.json` unchanged. Whether Grok then resumes that copy is Grok's own check; the user guide does not promise a resume after the files move to another `GROK_HOME`.
+
+`usage --history` calls `grok usage` once per session and adds up the numbers. It does not print the conversation. The working directory is left as it is. The user guide does not say whether `grok usage` only sees the current directory.
 
 Shell completion, printed only:
 
@@ -199,7 +203,7 @@ multi-grok completion zsh
 ## What this does not do
 
 - It does not move `~/.grok` or replace it with a symlink. The sandbox refuses a symlinked `GROK_HOME`.
-- It does not report a 5-hour or 7-day quota. Grok's status-line payload has session cost and context, and the user guide says a rate-limit summary is absent. `usage` forwards to `grok usage`.
+- It does not report a 5-hour or 7-day quota. Grok's status-line payload has session cost and context, and the user guide says a rate-limit summary is absent. `usage NAME SESSION` forwards to `grok usage`. `usage NAME --history` only sums that local JSON.
 - It does not read `auth.json`.
 - The user guide says a skill's `SKILL.md` may be a symlink. It does not say what happens when the whole `skills/` directory is a symlink. Shared items use that directory symlink anyway, so `config.toml` does not have to be rewritten. Treat skill discovery through that link as unverified.
 
@@ -209,7 +213,7 @@ multi-grok completion zsh
 python3 -m unittest discover -s tests -v
 ```
 
-Design notes: [docs/feature/feature-account-manager.md](docs/feature/feature-account-manager.md) and [docs/feature/feature-everyday-commands.md](docs/feature/feature-everyday-commands.md).
+Design notes: [docs/feature/feature-account-manager.md](docs/feature/feature-account-manager.md), [docs/feature/feature-everyday-commands.md](docs/feature/feature-everyday-commands.md), and [docs/feature/feature-help-examples.md](docs/feature/feature-help-examples.md).
 
 ## License
 

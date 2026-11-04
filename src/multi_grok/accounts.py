@@ -247,7 +247,11 @@ def directory_mode(path: str) -> Optional[int]:
 
 
 def describe(config: Config) -> List[Dict[str, str]]:
-    """list 用的只读状态。不打开 auth.json，只看它是不是普通文件。"""
+    """list 用的只读状态。不打开 auth.json，只看它是不是普通文件。
+
+    last 来自 summary.json 的 updated_at，不写入 config.json。
+    """
+    from .sessions import latest_updated, list_account
     rows = []
     for name in sorted(config.accounts):
         account = config.accounts[name]
@@ -261,6 +265,7 @@ def describe(config: Config) -> List[Dict[str, str]]:
             "login": _login_state(os.path.join(directory, "auth.json")),
             "isolate": _isolate_state(account.isolate, name, os.path.join(directory, "config.toml")),
             "shared": "on" if account.shared else "off",
+            "last": latest_updated(list_account(name, directory)),
         })
     return rows
 
