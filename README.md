@@ -36,6 +36,7 @@ Grok refuses a symlinked `GROK_HOME` when the sandbox starts. Account directorie
 - A new account gets a managed `config.toml` that turns off the Claude and Cursor compatibility scans. Those scans read `~/.claude` and `~/.cursor`, which do not follow `GROK_HOME`. An existing `config.toml` is left untouched.
 - Launchers unset `XAI_API_KEY`, `GROK_CODE_XAI_API_KEY`, `GROK_AUTH`, `GROK_AUTH_PATH`, `GROK_CONFIG` and `GROK_CONFIG_PATH`, so a key exported in the parent shell is not shared across accounts. Running `grok` directly is unchanged.
 - Write commands are safe to re-run. A same-named file that multi-grok does not own is a conflict, and then nothing is written. `remove` unregisters the account and deletes the launcher. It does not delete the directory.
+- Optional shared skills and commands, directory routing (`grok-auto`), session listing, and a copy of one session directory into another account. See [Everyday commands](#everyday-commands).
 
 ## Prerequisites
 
@@ -123,16 +124,29 @@ A login that already exists in `~/.grok` does not show up in `grok-home`. `home`
 
 | Command | What it does |
 | ---- | ---- |
-| `init [--root DIR] [--bin-dir DIR]` | Set the account root and the launcher directory. The root cannot change while accounts exist. |
-| `add <name> [--proxy VALUE] [--no-isolate]` | Register an account and write `grok-<name>`. Safe to re-run. |
-| `remove <name>` | Unregister the account and delete its launcher. The directory, `auth.json` and sessions stay. |
+| `init [--root DIR] [--bin-dir DIR] [--shared-dir DIR]` | Set the account root, the launcher directory, and the optional shared directory. The root cannot change while accounts exist. |
+| `add <name> [--proxy VALUE] [--no-isolate] [--shared [DIR]]` | Register an account and write `grok-<name>`. Safe to re-run. Sharing is off unless you pass `--shared`. |
+| `set <name> [--proxy VALUE] [--shared [DIR] \| --no-shared]` | Change proxy, isolate, or sharing on an account that already exists. |
+| `remove <name>` | Unregister the account, delete its launcher, and delete shared links this tool created. The directory, `auth.json` and sessions stay. |
+| `rename <old> <new>` | Rename the launcher. The directory and its login stay. |
 | `login <name> [-- grok-args]` | Run `grok login` with that account's `GROK_HOME`. |
 | `proxy <name> <port \| URL \| off \| inherit>` | Set the proxy. |
 | `env (<name> \| --defaults) [KEY=value ...] [--unset KEY]` | Set extra environment variables. |
 | `args (<name> \| --defaults) -- [args ...]` | Replace the fixed arguments. |
 | `apply [-f FILE]` | Make directories and launchers match the current config, or a JSON file. |
-| `list` | Read-only status. This is also the default when you run `multi-grok` alone. |
-| `doctor` | Check `PATH`, directories, launchers and the type of `auth.json`. |
+| `list [--json \| --names]` | Read-only status. This is also the default when you run `multi-grok` alone. |
+| `doctor [--json]` | Check `PATH`, directories, launchers, the router, and the type of `auth.json`. |
+| `path <name>` | Print the account directory. |
+| `run [<name>] -- <command...>` | Run a command with that account's environment. `--` is required. |
+| `route <dir> <name>` | Send `grok-auto` to that account for this directory and its children. |
+| `which [dir]` | Print the account `grok-auto` would pick. |
+| `mcp <name> [grok mcp args...]` | Run `grok mcp` inside that account. |
+| `usage <name> <session-id> [turn]` | Run `grok usage` inside that account. |
+| `sessions [<name>] [--grep TEXT] [--cmd] [--json]` | List sessions from `summary.json` only. |
+| `handoff <target> [--from NAME] --session ID [--force]` | Copy one session directory. It does not rewrite `summary.json`. |
+| `export <name> <file>` / `import <file> <name> [--force]` | Pack or unpack skills and the other shared directories. No login, no sessions. |
+| `completion bash\|zsh\|fish` | Print a completion script. Nothing is written to your shell startup file. |
+| `code <name> [path] -- [args...]` | Experimental. Separate VS Code user data, plus this account's environment. |
 
 Write commands accept `--dry-run` and `--verbose`. Exit codes: `0` success, `1` error, `2` bad usage, `3` conflict (nothing written), `4` another multi-grok process holds the write lock.
 
@@ -144,13 +158,58 @@ multi-grok apply -f examples/config.example.json
 
 `apply -f` replaces the account list with the file. An account missing from the file is unregistered. Its directory stays.
 
+## Everyday commands
+
+Share one skills directory between accounts. The account directory stays real. The `skills` entry inside it becomes a symlink:
+
+```sh
+mkdir -p ~/.grok-shared/skills
+multi-grok set home --shared ~/.grok-shared
+```
+
+Items you can share: `skills`, `commands`, `agents`, `plugins`, `workflows`, `hooks`, `rules`, `personas`. The default set is the first three. `sessions`, memory, logs, `auth.json` and `config.toml` are never linked. A directory that is already a real folder is a conflict, and then nothing is written. `--adopt` records a link you already made, so a later `--no-shared` will remove it.
+
+Pick an account from the current directory:
+
+```sh
+multi-grok route ~/src/work work
+multi-grok route --default home
+grok-auto
+multi-grok which
+```
+
+The longest existing directory wins. With no match and no default, `grok-auto` runs `grok` from `PATH`, which still uses `~/.grok`.
+
+List sessions across accounts, without opening the conversation log:
+
+```sh
+multi-grok sessions --grep launcher --cmd
+multi-grok usage home SESSION_ID
+multi-grok handoff work --from home --session SESSION_ID
+```
+
+`--cmd` prints `cd` and `grok-<name> --resume`, because Grok matches a resume title in the current directory. Handoff copies the session directory and leaves `summary.json` unchanged. Whether Grok then resumes that copy is Grok's own check; the user guide does not promise a resume after the files move to another `GROK_HOME`.
+
+Shell completion, printed only:
+
+```sh
+multi-grok completion zsh
+```
+
+## What this does not do
+
+- It does not move `~/.grok` or replace it with a symlink. The sandbox refuses a symlinked `GROK_HOME`.
+- It does not report a 5-hour or 7-day quota. Grok's status-line payload has session cost and context, and the user guide says a rate-limit summary is absent. `usage` forwards to `grok usage`.
+- It does not read `auth.json`.
+- The user guide says a skill's `SKILL.md` may be a symlink. It does not say what happens when the whole `skills/` directory is a symlink. Shared items use that directory symlink anyway, so `config.toml` does not have to be rewritten. Treat skill discovery through that link as unverified.
+
 ## Development
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-The design note is [docs/feature/feature-account-manager.md](docs/feature/feature-account-manager.md).
+Design notes: [docs/feature/feature-account-manager.md](docs/feature/feature-account-manager.md) and [docs/feature/feature-everyday-commands.md](docs/feature/feature-everyday-commands.md).
 
 ## License
 

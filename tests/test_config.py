@@ -36,11 +36,22 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             parse_config(raw, "fixture")
 
-    def test_unknown_shared_key_is_rejected(self):
-        raw = json.dumps({"version": 1, "shared": {"dir": "~/.grok-shared"}})
+    def test_unknown_key_is_rejected(self):
+        raw = json.dumps({"version": 1, "identity": "default"})
         with self.assertRaises(ConfigError) as caught:
             parse_config(raw, "fixture")
-        self.assertIn("shared", str(caught.exception))
+        self.assertIn("identity", str(caught.exception))
+
+    def test_default_dump_omits_new_sections(self):
+        from multi_grok.config import dump_config
+        config = parse_config(json.dumps({
+            "version": 1,
+            "accounts": {"home": {"proxy": "inherit", "isolate": True, "env": {}, "args": []}},
+        }), "fixture")
+        text = dump_config(config)
+        self.assertNotIn("shared", text)
+        self.assertNotIn("routes", text)
+        self.assertNotIn('"dir"', text)
 
 
 if __name__ == "__main__":

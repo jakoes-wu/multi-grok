@@ -99,3 +99,18 @@ def unlink_file(path: str) -> None:
     """删除一个普通文件。软链、目录和其它类型一律不动，避免删到账号数据。"""
     if entry_kind(path) == KIND_FILE:
         os.unlink(path)
+
+
+def unlink_link(path: str) -> None:
+    """只删除软链。真实目录里可能有登录和会话，这里不能删。"""
+    if entry_kind(path) == KIND_LINK:
+        os.unlink(path)
+
+
+def same_target(link: str, source: str) -> bool:
+    """软链的目标是否就是 source。不解析目标本身是不是另一层软链。"""
+    try:
+        current = os.readlink(link)
+    except OSError:
+        return False
+    return os.path.abspath(current) == os.path.abspath(source)

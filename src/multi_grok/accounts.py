@@ -13,6 +13,8 @@ from .fsutil import (KIND_DIR, KIND_FILE, KIND_LINK, KIND_MISSING, atomic_write,
                      is_under, read_text, unlink_file)
 from .launcher import launcher_path, managed_account, render, scan_managed
 from .platform import default_grok_home
+from .routes import plan_router
+from .shared import plan_shared
 
 # 第一行是受管标记。用户改过、或不是我们写的 config.toml，一律不覆盖。
 ISOLATE_MARKER = "# managed-by: multi-grok account="
@@ -57,9 +59,12 @@ def clashes_with_default_home(path: str) -> bool:
     return path == default_home or is_under(path, default_home) or is_under(default_home, path)
 
 
-def plan(config: Config) -> List[Action]:
-    """只读地列出收敛动作。账号按名字排序，结果稳定。"""
-    actions = [_config_action(config)]
+def plan(config: Config, old: Optional[Config] = None) -> List[Action]:
+    """列出收敛动作。共享链接会改 managed_links，所以 config.json 的动作放在这些修改之后再生成。
+
+    执行时仍然先写 config.json。中途失败后再跑一次 apply，能按新配置把缺的链接补上。
+    """
+    actions: List[Action] = []
     root = expand(config.root)
     root_kind = entry_kind(root)
     if root_kind == KIND_LINK:
@@ -67,10 +72,12 @@ def plan(config: Config) -> List[Action]:
                               "account root is a symlink; GROK_HOME must be a real directory"))
     elif root_kind not in (KIND_MISSING, KIND_DIR):
         actions.append(Action(CONFLICT, "account-root", root, "account root is not a directory"))
+    old_shared = old.shared_dir if old is not None else config.shared_dir
     for name in sorted(config.accounts):
-        actions.extend(_account_actions(config, name, block_root=root_kind == KIND_LINK))
+        actions.extend(_account_actions(config, name, block_root=root_kind == KIND_LINK, old_shared=old_shared))
+    actions.extend(plan_router(config))
     actions.extend(_orphan_launcher_actions(config))
-    return actions
+    return [_config_action(config)] + actions
 
 
 def _config_action(config: Config) -> Action:
@@ -93,7 +100,7 @@ def _config_action(config: Config) -> Action:
     return Action(status, "config", path, run=write)
 
 
-def _account_actions(config: Config, name: str, block_root: bool) -> List[Action]:
+def _account_actions(config: Config, name: str, block_root: bool, old_shared: Optional[str]) -> List[Action]:
     account = config.accounts[name]
     path = account_dir(config, name)
     actions: List[Action] = []
@@ -117,6 +124,7 @@ def _account_actions(config: Config, name: str, block_root: bool) -> List[Action
         actions.append(Action(UNCHANGED, "account-dir", path))
     actions.append(_isolate_action(account.isolate, name, os.path.join(path, "config.toml")))
     actions.append(_launcher_action(config, name))
+    actions.extend(plan_shared(config, account, path, old_shared))
     return actions
 
 
@@ -143,7 +151,12 @@ def _isolate_action(isolate: bool, name: str, path: str) -> Action:
                       "config.toml is a symlink; multi-grok will not follow or replace it")
     if not isolate:
         if kind == KIND_FILE and _first_line(path) == marker:
-            return Action(DELETE, "isolate-config", path, run=_unlink(path))
+            # 只有仍等于模板的文件才删。Grok 会在标记还在时往文件末尾追加段落，
+            # 按标记整份删除会把那些段落一起删掉。
+            if read_text(path) == text:
+                return Action(DELETE, "isolate-config", path, run=_unlink(path))
+            return Action(SKIP, "isolate-config", path,
+                          "managed file was edited after it was written; left untouched")
         if kind == KIND_MISSING:
             return Action(UNCHANGED, "isolate-config", path, "isolate is off")
         return Action(SKIP, "isolate-config", path, "isolate is off; left the existing file")
@@ -159,7 +172,9 @@ def _isolate_action(isolate: bool, name: str, path: str) -> Action:
                       "existing config.toml is not managed by multi-grok; left untouched")
     if current == text:
         return Action(UNCHANGED, "isolate-config", path)
-    return Action(UPDATE, "isolate-config", path, run=_write_private(path, text))
+    # 标记还在、正文已经不是模板时，不再写回。写回会清掉 Grok 追加的段落。
+    return Action(SKIP, "isolate-config", path,
+                  "managed file was edited after it was written; left untouched")
 
 
 def _launcher_action(config: Config, name: str) -> Action:
@@ -245,6 +260,7 @@ def describe(config: Config) -> List[Dict[str, str]]:
             "launcher": _launcher_state(config, account.name, launcher),
             "login": _login_state(os.path.join(directory, "auth.json")),
             "isolate": _isolate_state(account.isolate, name, os.path.join(directory, "config.toml")),
+            "shared": "on" if account.shared else "off",
         })
     return rows
 

@@ -36,6 +36,7 @@ Grok 在沙箱启动时拒绝符号链接形式的 `GROK_HOME`。账号目录必
 - 新建账号时写入一份受管的 `config.toml`，关掉对 `~/.claude` 和 `~/.cursor` 的兼容扫描。这两处路径不随 `GROK_HOME` 改变；不关掉的话，各账号仍会读到同一套 Claude / Cursor 技能和规则。已有的 `config.toml` 不会被覆盖。
 - 启动命令会清除 `XAI_API_KEY`、`GROK_CODE_XAI_API_KEY`、`GROK_AUTH`、`GROK_AUTH_PATH`、`GROK_CONFIG`、`GROK_CONFIG_PATH`。父 shell 里导出的这些变量不再串到别的账号上。直接运行 `grok` 不受影响。
 - 写操作可重复执行。和本工具无关的同名文件算冲突，这时什么都不写。`remove` 只注销账号并删除启动命令，不删除账号目录。
+- 可选的共享技能、按目录选择账号（`grok-auto`）、会话列表，以及把一个会话目录复制到另一个账号。见[日常命令](#日常命令)。
 
 ## 环境
 
@@ -123,16 +124,29 @@ multi-grok args work -- --permission-mode acceptEdits
 
 | 命令 | 作用 |
 | ---- | ---- |
-| `init [--root DIR] [--bin-dir DIR]` | 设置账号根目录和启动命令目录。已有账号时不能改根目录 |
-| `add <名称> [--proxy 值] [--no-isolate]` | 登记账号并写 `grok-<名称>`。重复执行是安全的 |
-| `remove <名称>` | 注销并删除启动命令。目录、`auth.json`、会话都保留 |
+| `init [--root DIR] [--bin-dir DIR] [--shared-dir DIR]` | 设置账号根目录、启动命令目录，以及可选的共享目录。已有账号时不能改根目录 |
+| `add <名称> [--proxy 值] [--no-isolate] [--shared [DIR]]` | 登记账号并写 `grok-<名称>`。重复执行是安全的。不加 `--shared` 就不做共享链接 |
+| `set <名称> [--proxy 值] [--shared [DIR] \| --no-shared]` | 改已有账号的代理、隔离或共享 |
+| `remove <名称>` | 注销、删除启动命令，并删除本工具建的共享链接。目录、`auth.json`、会话都保留 |
+| `rename <旧名> <新名>` | 改启动命令。目录和登录文件留在原处 |
 | `login <名称> [-- grok 的参数]` | 在该账号的 `GROK_HOME` 里执行 `grok login` |
 | `proxy <名称> <端口 \| URL \| off \| inherit>` | 设置代理 |
 | `env (<名称> \| --defaults) [键=值 ...] [--unset 键]` | 设置额外环境变量 |
 | `args (<名称> \| --defaults) -- [参数 ...]` | 整体替换固定参数 |
 | `apply [-f 文件]` | 按当前配置或一份 JSON 把目录和启动命令收敛到一致 |
-| `list` | 只读列出状态。不带子命令时也是它 |
-| `doctor` | 检查 `PATH`、目录、启动命令和 `auth.json` 的类型 |
+| `list [--json \| --names]` | 只读列出状态。不带子命令时也是它 |
+| `doctor [--json]` | 检查 `PATH`、目录、启动命令、路由脚本和 `auth.json` 的类型 |
+| `path <名称>` | 打印账号目录 |
+| `run [<名称>] -- <命令...>` | 用该账号的环境运行一条命令。必须带 `--` |
+| `route <目录> <名称>` | 让 `grok-auto` 在这个目录及其子目录里使用该账号 |
+| `which [目录]` | 打印 `grok-auto` 会选中的账号 |
+| `mcp <名称> [grok mcp 的参数...]` | 在该账号里执行 `grok mcp` |
+| `usage <名称> <会话 id> [轮次]` | 在该账号里执行 `grok usage` |
+| `sessions [<名称>] [--grep 文本] [--cmd] [--json]` | 只从 `summary.json` 列会话 |
+| `handoff <目标> [--from 名称] --session ID [--force]` | 复制一个会话目录。不改写 `summary.json` |
+| `export <名称> <文件>` / `import <文件> <名称> [--force]` | 打包或还原技能等共享目录。不含登录，不含会话 |
+| `completion bash\|zsh\|fish` | 打印补全脚本。不改 shell 启动文件 |
+| `code <名称> [路径] -- [参数...]` | 实验性。单独的 VS Code 用户数据目录，加上该账号的环境 |
 
 写命令都接受 `--dry-run` 和 `--verbose`。退出码：`0` 成功，`1` 错误，`2` 用法错误，`3` 有冲突所以什么都没写，`4` 另一个 multi-grok 正在写配置。
 
@@ -144,13 +158,58 @@ multi-grok apply -f examples/config.example.json
 
 `apply -f` 以文件为准。文件里没有的账号会被注销（启动命令删除，目录保留）。
 
+## 日常命令
+
+几个账号共用一份技能目录。账号目录仍是真实目录，里面的 `skills` 变成软链：
+
+```sh
+mkdir -p ~/.grok-shared/skills
+multi-grok set home --shared ~/.grok-shared
+```
+
+可以共享的名字：`skills`、`commands`、`agents`、`plugins`、`workflows`、`hooks`、`rules`、`personas`。默认是前三个。会话、记忆、日志、`auth.json`、`config.toml` 不会被链出去。目标位置已经是真实目录时算冲突，这时什么都不写。`--adopt` 把你自己早就指对的软链记下来，之后 `--no-shared` 才会删它。
+
+按当前目录选账号：
+
+```sh
+multi-grok route ~/src/work work
+multi-grok route --default home
+grok-auto
+multi-grok which
+```
+
+最长的、并且进得去的目录赢。没有命中、也没有默认账号时，`grok-auto` 运行 `PATH` 里的 `grok`，仍使用 `~/.grok`。
+
+跨账号列会话，不打开对话日志：
+
+```sh
+multi-grok sessions --grep launcher --cmd
+multi-grok usage home 会话ID
+multi-grok handoff work --from home --session 会话ID
+```
+
+`--cmd` 会带上 `cd` 和 `grok-<名称> --resume`，因为 Grok 按当前目录匹配恢复用的标题。交接只复制会话目录，不改 `summary.json`。复制过去之后能否 `--resume`，以 Grok 自己的检查为准；用户指南没有写换一个 `GROK_HOME` 之后仍能恢复。
+
+补全脚本只打印，不写入启动文件：
+
+```sh
+multi-grok completion zsh
+```
+
+## 不做的事
+
+- 不移动 `~/.grok`，也不把它换成软链。沙箱拒绝软链形式的 `GROK_HOME`。
+- 不查询 5 小时或 7 天额度。状态栏载荷里有本次会话的费用和上下文，用户指南写明没有额度摘要。`usage` 转给 `grok usage`。
+- 不读取 `auth.json`。
+- 用户指南写了技能的 `SKILL.md` 可以是软链，没有写整个 `skills/` 目录是软链时怎么发现技能。共享条目仍使用这种目录软链，这样不必改写 `config.toml`。通过这层软链能不能被 Grok 扫到，尚未验证。
+
 ## 开发
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-方案说明在 [docs/feature/feature-account-manager.md](docs/feature/feature-account-manager.md)。
+方案说明在 [docs/feature/feature-account-manager.md](docs/feature/feature-account-manager.md) 和 [docs/feature/feature-everyday-commands.md](docs/feature/feature-everyday-commands.md)。
 
 ## 许可
 

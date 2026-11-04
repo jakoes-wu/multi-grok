@@ -10,6 +10,7 @@ from .config import Config, config_path
 from .fsutil import expand
 from .launcher import trailing_option_warning
 from .platform import ISOLATION_ENV, is_supported
+from .routes import router_status
 
 
 def diagnose(config: Config) -> Tuple[List[str], List[str]]:
@@ -42,6 +43,11 @@ def diagnose(config: Config) -> Tuple[List[str], List[str]]:
         if drifted:
             problems.append("filesystem does not match config.json ({} change(s)); run `multi-grok apply`".format(
                 len(drifted)))
+    status = router_status(config)
+    if status == "conflict":
+        problems.append("grok-auto exists and is not the managed router")
+    elif status in ("missing", "stale"):
+        problems.append("grok-auto is {}; run `multi-grok apply`".format(status))
     root_mode = directory_mode(expand(config.root))
     if root_mode is not None and root_mode & 0o077:
         warnings.append("{} is readable by group or others; account names can be listed".format(expand(config.root)))
