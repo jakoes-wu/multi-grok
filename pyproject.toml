@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-grok"
+dynamic = ["version"]
+description = "Run several Grok accounts side by side. Each account has its own directory under ~/.grok-accounts and a grok-<name> launcher."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+keywords = ["grok", "xai", "multi-account", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+]
+
+[project.scripts]
+multi-grok = "multi_grok.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jakoes-wu/multi-grok"
+Changelog = "https://github.com/jakoes-wu/multi-grok/blob/main/CHANGELOG.md"
+Issues = "https://github.com/jakoes-wu/multi-grok/issues"
+
+[tool.setuptools.dynamic]
+version = {attr = "multi_grok.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

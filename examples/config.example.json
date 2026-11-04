@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "root": "~/.grok-accounts",
+  "bin_dir": "~/.local/bin",
+  "defaults": {
+    "env": {},
+    "args": []
+  },
+  "accounts": {
+    "home": {
+      "proxy": "inherit",
+      "isolate": true,
+      "env": {},
+      "args": []
+    },
+    "work": {
+      "proxy": "http://127.0.0.1:7890",
+      "isolate": true,
+      "env": {},
+      "args": ["--permission-mode", "acceptEdits"]
+    }
+  }
+}
