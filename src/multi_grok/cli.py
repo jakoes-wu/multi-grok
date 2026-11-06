@@ -17,12 +17,13 @@ from typing import List, Optional, Sequence
 from . import __version__
 from .accounts import describe, plan
 from .actions import error, has_conflict, print_action, warn
-from .config import (PROXY_INHERIT, SHARED_ITEM_NAMES, Account, Config, ConfigError, account_dir, config_path,
-                     load_config, normalize_proxy, parse_config, validate_env_key, validate_name,
-                     validate_shared_item, validate_value)
+from .config import (NET_CHECK_LEVELS, PROXY_INHERIT, SHARED_ITEM_NAMES, Account, ClashApi, Config, ConfigError,
+                     account_dir, config_path, load_config, normalize_clash_address, normalize_country,
+                     normalize_proxy, parse_config, validate_env_key, validate_name, validate_shared_item,
+                     validate_value)
 from .doctor import diagnose
 from .fsutil import KIND_DIR, KIND_MISSING, entry_kind, expand, read_text
-from .launcher import build_env, launcher_path, trailing_option_warning
+from .launcher import LAUNCHER_PREFIX, build_env, launcher_path, trailing_option_warning
 from .lock import LockBusyError, WriteLock
 from .platform import default_grok_home, is_supported
 
@@ -31,6 +32,8 @@ EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_CONFLICT = 3
 EXIT_BUSY = 4
+# 启动前网络检查未通过，没有启动任何程序（docs/feature/feature-network-check.md §5.1.4）。
+EXIT_NETCHECK = 5
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -43,6 +46,14 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         error("this operating system is not supported; use macOS or Linux")
         return EXIT_ERROR
     raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "netgate":
+        # 隐藏子命令，只由开启检查的启动命令调用；不经 argparse，不进帮助与补全。
+        try:
+            return cmd_netgate(raw[1:])
+        except ConfigError as exc:
+            error(str(exc))
+            return EXIT_ERROR
+    raw = _resolve_command_alias(raw)
     raw, forwarded = _split_forwarded(raw)
     parser = _parser()
     try:
@@ -64,6 +75,21 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     except OSError as exc:
         error(str(exc))
         return EXIT_ERROR
+
+
+# 子命令别名：在 argparse 之前把别名换成正式名，帮助、补全与分派都只认正式名（照 multi-codex 0.13.0）。
+_COMMAND_ALIASES = {"conversations": "sessions"}
+
+
+def _resolve_command_alias(argv: List[str]) -> List[str]:
+    """第一个不以 `-` 开头的词是别名时换成正式子命令名；其它位置（如名叫 conversations 的账号）不动。"""
+    for index, word in enumerate(argv):
+        if word.startswith("-"):
+            continue
+        if word in _COMMAND_ALIASES:
+            return argv[:index] + [_COMMAND_ALIASES[word]] + argv[index + 1:]
+        break
+    return argv
 
 
 def _split_forwarded(argv: List[str]) -> tuple:
@@ -97,10 +123,12 @@ COMMAND_GROUPS = [
         ("proxy, env, args", "set the proxy, extra variables or fixed arguments"),
         ("rename, remove", "rename an account, or unregister it; the directory stays"),
         ("export, import", "copy skills and related directories; no login or sessions"),
+        ("netcheck NAME", "check proxy, exit country or Clash before each launch"),
+        ("clash-api", "set the Clash / mihomo controller used by netcheck"),
     ]),
     ("Everyday", [
         ("usage", "run `grok usage`, or sum it with --history"),
-        ("sessions", "list sessions from each account's summary.json"),
+        ("sessions", "list sessions from each account's summary.json (also `conversations`)"),
         ("route, which", "choose an account by directory for grok-auto"),
         ("handoff", "copy one session directory to another account"),
         ("mcp", "run `grok mcp` inside one account"),
@@ -142,12 +170,14 @@ COMMAND_HELP = {
     "path": "print an account directory",
     "mcp": "run `grok mcp ...` inside one account",
     "usage": "run `grok usage` inside one account, or sum it with --history",
-    "sessions": "list sessions from each account's summary.json",
+    "sessions": "list sessions from each account's summary.json (also `conversations`)",
     "handoff": "copy one session directory to another account",
     "code": "open VS Code with one account's environment (experimental)",
     "export": "write skills and related directories to a .tar.gz; no login or sessions",
     "import": "import a file written by export into an existing account",
     "completion": "print a shell completion script",
+    "netcheck": "set or test the pre-launch network check of an account",
+    "clash-api": "set the Clash / mihomo controller used by the network check",
 }
 
 # 每个子命令自己的示例。只列 README 和当前实现里已经成立的用法。
@@ -255,6 +285,19 @@ COMMAND_EXAMPLES = {
         "multi-grok completion bash",
         "multi-grok completion zsh",
         "multi-grok completion fish",
+    ),
+    "netcheck": (
+        "multi-grok netcheck work",
+        "multi-grok netcheck work basic",
+        "multi-grok netcheck work strict --country JP",
+        "multi-grok netcheck work --clash-tun on",
+        "multi-grok netcheck work off --clash off",
+    ),
+    "clash-api": (
+        "multi-grok clash-api",
+        "multi-grok clash-api auto",
+        "multi-grok clash-api 127.0.0.1:9097 --secret-stdin",
+        "multi-grok clash-api off",
     ),
 }
 
@@ -418,8 +461,28 @@ def _parser() -> argparse.ArgumentParser:
     import_cmd.add_argument("name")
     import_cmd.add_argument("--force", action="store_true", help="replace an existing directory after renaming it aside")
 
+    netcheck = _sub(sub, "netcheck", parents=[common])
+    netcheck.add_argument("name")
+    netcheck.add_argument("level", nargs="?", choices=NET_CHECK_LEVELS,
+                          help="off, basic (proxy port reachable) or strict (exit country checked too); "
+                               "omit to show and test the current setting")
+    netcheck.add_argument("--country", metavar="CC", help="exit country for strict (default US)")
+    netcheck.add_argument("--clash", choices=("on", "off"),
+                          help="both Clash checks: TUN on and global mode")
+    netcheck.add_argument("--clash-tun", choices=("on", "off"),
+                          help="require Clash TUN on and the mode not direct")
+    netcheck.add_argument("--clash-global", choices=("on", "off"), help="require Clash global mode")
+
+    clash_api = _sub(sub, "clash-api", parents=[common])
+    clash_api.add_argument("address", nargs="?",
+                           help="HOST:PORT, http://HOST:PORT, unix:/PATH, auto or off; omit to show the setting")
+    clash_api.add_argument("--secret-stdin", action="store_true",
+                           help="read the controller secret from one line of standard input")
+
     completion = _sub(sub, "completion")
-    completion.add_argument("shell", choices=("bash", "zsh", "fish"))
+    completion.add_argument("shell", nargs="?", choices=("bash", "zsh", "fish"))
+    # 只给补全脚本自己调用（补 --shared-exclude / --shared-include 的值），不进帮助与补全。
+    completion.add_argument("--list-shared-items", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -476,7 +539,11 @@ def _dispatch(args: argparse.Namespace, forwarded: Optional[List[str]]) -> int:
     if command == "import":
         return cmd_import(args)
     if command == "completion":
-        return cmd_completion(args.shell)
+        return cmd_completion(args)
+    if command == "netcheck":
+        return cmd_netcheck(args)
+    if command == "clash-api":
+        return cmd_clash_api(args)
     if command == "init":
         return cmd_init(args)
     if command == "add":
@@ -699,7 +766,20 @@ def cmd_apply(args: argparse.Namespace) -> int:
         if raw is None:
             error("cannot read {}".format(args.file))
             return EXIT_ERROR
+        # clash_api 是这台机器的设置，不随账号文件替换（方案 §5.1.1）：解析前整键去掉，
+        # 文件里的值即使不合法也不会让 apply 失败。JSON 本身坏掉时交给 parse_config 报错。
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and "clash_api" in data:
+            del data["clash_api"]
+            raw = json.dumps(data)
+            warn("'clash_api' in {} is ignored; it is a setting of this machine, change it with "
+                 "`multi-grok clash-api`".format(args.file))
         config = parse_config(raw, args.file)
+        current, _exists = load_config()
+        config.clash_api = current.clash_api.copy() if current.clash_api is not None else None
     else:
         config, _exists = load_config()
     return _commit(config, args.dry_run, args.verbose)
@@ -741,6 +821,10 @@ def cmd_login(name: str, extra: List[str]) -> int:
     if entry_kind(directory) != KIND_DIR:
         error("account directory is not a real directory; run `multi-grok apply`")
         return EXIT_ERROR
+    # 先检查网络再找 grok，与启动命令里检查段排在 `command -v grok` 之前一致。
+    gate_code = _net_gate(config, account, "multi-grok login " + account.name)
+    if gate_code is not None:
+        return gate_code
     if shutil.which("grok") is None:
         error("grok not found in PATH")
         return 127
@@ -840,8 +924,13 @@ def _apply_share_flags(config: Config, account: Account, args: argparse.Namespac
             account.shared_exclude.remove(item)
 
 
-def _prepare(name: str, need_grok: bool):
-    """返回 (config, account, env)。失败时已经打印原因，返回 (None, None, code)。"""
+def _prepare(name: str, need_grok: bool, gate_hint: Optional[str] = None):
+    """返回 (config, account, env)。失败时已经打印原因，返回 (None, None, code)。
+
+    gate_hint 有值时在找 grok 之前做启动前网络检查（hint 用于拼“本次跳过”的写法）；
+    不通过返回 (None, None, 5) 或 Ctrl+C 时的 130。检查会先从 os.environ 删掉跳过变量，
+    之后才构造环境，所以经这里启动的程序不会继承“跳过”。
+    """
     config, _exists = load_config()
     account = config.find(name)
     if account is None:
@@ -851,6 +940,10 @@ def _prepare(name: str, need_grok: bool):
     if entry_kind(directory) != KIND_DIR:
         error("account directory is not a real directory; run `multi-grok apply`")
         return None, None, EXIT_ERROR
+    if gate_hint is not None:
+        gate_code = _net_gate(config, account, gate_hint)
+        if gate_code is not None:
+            return None, None, gate_code
     if need_grok and shutil.which("grok") is None:
         error("grok not found in PATH")
         return None, None, 127
@@ -858,8 +951,8 @@ def _prepare(name: str, need_grok: bool):
     return config, account, env
 
 
-def _exec_grok(name: str, grok_args: List[str], include_fixed: bool) -> int:
-    config, account, env = _prepare(name, need_grok=True)
+def _exec_grok(name: str, grok_args: List[str], include_fixed: bool, gate_hint: Optional[str] = None) -> int:
+    config, account, env = _prepare(name, need_grok=True, gate_hint=gate_hint)
     if config is None:
         return env
     command = ["grok"]
@@ -961,9 +1054,10 @@ def cmd_run(name: Optional[str], forwarded: Optional[List[str]]) -> int:
             error("no account is routed to this directory; pass a name")
             return EXIT_ERROR
         name = account.name
+    hint = "multi-grok run " + name
     if not forwarded:
-        return _exec_grok(name, [], include_fixed=True)
-    _config, _account, env = _prepare(name, need_grok=False)
+        return _exec_grok(name, [], include_fixed=True, gate_hint=hint)
+    _config, _account, env = _prepare(name, need_grok=False, gate_hint=hint)
     if _config is None:
         return env
     return subprocess.call(list(forwarded), env=env)
@@ -1258,7 +1352,7 @@ def cmd_handoff(args: argparse.Namespace) -> int:
 def cmd_code(args: argparse.Namespace, extra: List[str]) -> int:
     warn("experimental: this sets GROK_HOME for a separate VS Code user-data directory. "
          "The user guide does not say whether the editor extension reads GROK_HOME.")
-    config, account, env = _prepare(args.name, need_grok=False)
+    config, account, env = _prepare(args.name, need_grok=False, gate_hint="multi-grok code " + args.name)
     if config is None:
         return env
     if shutil.which("code", path=env.get("PATH")) is None:
@@ -1316,9 +1410,250 @@ def cmd_import(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def cmd_completion(shell: str) -> int:
+def _netcheck():
+    """延迟导入联网检查模块：它会带进 http.client、ssl，未开启检查的启动不付这笔导入开销。"""
+    from . import netcheck
+    return netcheck
+
+
+def _net_gate(config: Config, account: Account, hint: str) -> Optional[int]:
+    """启动前网络检查：返回 None 表示放行，否则返回调用方应直接返回的退出码。
+
+    未开启、或账号目录不是真实目录时不检查：目录错误交给原有路径报告，与启动命令里“目录 → 检查 → grok”的顺序一致。
+    失败返回 EXIT_NETCHECK（5），此时没有启动任何程序；Ctrl+C 中断检查返回 130（与 shell 的 SIGINT 约定一致）。
+    """
+    if not account.net_check.active or entry_kind(account_dir(config, account.name)) != KIND_DIR:
+        return None
+    try:
+        failure = _netcheck().gate(config, account, hint)
+    except KeyboardInterrupt:
+        sys.stderr.write("multi-grok: network check interrupted\n")
+        return 130
+    if failure is None:
+        return None
+    sys.stderr.write(failure + "\n")
+    sys.stderr.flush()
+    return EXIT_NETCHECK
+
+
+def cmd_netgate(argv: List[str]) -> int:
+    """隐藏子命令 `netgate NAME`：开启检查的启动命令在启动 grok 前调用，通过返回 0，未通过返回 5。"""
+    if len(argv) != 1:
+        error("usage: multi-grok netgate NAME")
+        return EXIT_USAGE
+    config, _exists = load_config()
+    account = config.find(argv[0])
+    if account is None:
+        error("unknown account {!r}".format(argv[0]))
+        return EXIT_ERROR
+    gate_code = _net_gate(config, account, LAUNCHER_PREFIX + account.name)
+    return EXIT_OK if gate_code is None else gate_code
+
+
+def cmd_netcheck(args: argparse.Namespace) -> int:
+    """`netcheck NAME [档位] [选项]`：不带设置参数时显示并立即检查一次；带参数时修改并写入。
+
+    写入顺序（方案 §5.1.5）：先读一次配置判断要不要自动查找 Clash 接口 → 不持锁查找（可能要几十秒）→
+    重新读配置、按改完后的结果校验、走 _commit（锁在 _commit 里）。查找期间别的命令写入的内容不会被覆盖。
+    """
+    try:
+        validate_name(args.name)
+    except ValueError as exc:
+        error(str(exc))
+        return EXIT_USAGE
+    if args.clash is not None and (args.clash_tun is not None or args.clash_global is not None):
+        # --clash 是两项一起的简写，与单项开关同时给出时含义不清。在查找之前判断，免得白等。
+        error("--clash sets both Clash checks; use it alone or use --clash-tun / --clash-global")
+        return EXIT_USAGE
+    settings = (args.level, args.country, args.clash, args.clash_tun, args.clash_global)
+    if all(value is None for value in settings):
+        return _netcheck_show(args.name)
+    found = None
+    probe, _exists = load_config()
+    current = probe.find(args.name)
+    if current is not None and probe.clash_api is None:
+        # 按“改完以后”是否开着 Clash 检测决定要不要查找：本次没动 Clash 开关、但账号原本就开着时也要查。
+        tun = args.clash if args.clash is not None else args.clash_tun
+        mode = args.clash if args.clash is not None else args.clash_global
+        will_tun = current.net_check.clash_tun if tun is None else tun == "on"
+        will_global = current.net_check.clash_global if mode is None else mode == "on"
+        if will_tun or will_global:
+            found, _code = _find_clash(args.verbose, required=False)
+    config, _exists = load_config()
+    account = config.find(args.name)
+    if account is None:
+        error("unknown account {!r}".format(args.name))
+        return EXIT_ERROR
+    try:
+        _apply_netcheck_changes(config, account, args, found)
+    except ValueError as exc:
+        error(str(exc))
+        return EXIT_USAGE
+    code = _commit(config, args.dry_run, args.verbose)
+    if code == EXIT_OK and not args.dry_run:
+        if account.net_check.active:
+            print("network check of {}: {}".format(account.name, _netcheck().scope_text(account)))
+        else:
+            print("network check of {}: off".format(account.name))
+    return code
+
+
+def _netcheck_show(name: str) -> int:
+    """显示设置并立即检查一次，逐项列出（不在第一个失败处停下）。只读、不加锁。"""
+    config, _exists = load_config()
+    account = config.find(name)
+    if account is None:
+        error("unknown account {!r}".format(name))
+        return EXIT_ERROR
+    if not account.net_check.active:
+        print("network check is off for {}".format(account.name))
+        return EXIT_OK
+    print("network check of {}: {}".format(account.name, _netcheck().scope_text(account)))
+    try:
+        results = _netcheck().run_checks(config, account, stop_on_failure=False)
+    except KeyboardInterrupt:
+        sys.stderr.write("multi-grok: network check interrupted\n")
+        return 130
+    for result in results:
+        print("{:<4} {} {} ({} ms)".format("ok" if result.ok else "fail", result.item, result.detail,
+                                           result.elapsed_ms))
+    return EXIT_OK if all(result.ok for result in results) else EXIT_NETCHECK
+
+
+def _apply_netcheck_changes(config: Config, account: Account, args: argparse.Namespace,
+                            found: Optional[ClashApi]) -> None:
+    """按 netcheck 的写形态修改账号设置；按改完后的结果校验，不合法时抛 ValueError（退出 2，什么都不写）。"""
+    check = account.net_check
+    if args.level is not None:
+        check.level = args.level
+    if args.country is not None:
+        check.country = normalize_country(args.country)
+    if args.clash is not None:
+        check.clash_tun = check.clash_global = args.clash == "on"
+    if args.clash_tun is not None:
+        check.clash_tun = args.clash_tun == "on"
+    if args.clash_global is not None:
+        check.clash_global = args.clash_global == "on"
+    if check.level in ("basic", "strict") and "://" not in account.proxy:
+        # 代理是 inherit / off 时端口与出口都无从检查。配置解析时不拒绝（见方案 §3），只在设置时拦。
+        raise ValueError("the {} check needs a proxy, but the proxy of {} is {}; set one first, e.g. "
+                         "`multi-grok proxy {} 7890`".format(check.level, account.name, account.proxy, account.name))
+    if check.level == "strict" and account.proxy.startswith("https://"):
+        raise ValueError("the strict check does not support https:// proxies; use http://")
+    if args.country is not None and check.level != "strict":
+        if check.active:
+            warn("country is only used by strict; it is saved for when you switch to strict")
+        else:
+            # 未开启的账号不保存检查设置（Account.to_dict 只在开启时写 net_check），明说一句，免得以为已记下。
+            warn("country is only used by strict; the network check of {} is off, so it is not saved".format(
+                account.name))
+    if check.clash_global and not check.clash_tun:
+        # 只查全局防不住直连：grok 不走代理端口时 Clash 根本接不到这些流量。每次写都提醒。
+        warn("global mode without TUN only covers traffic sent to the proxy port; a direct connection is not "
+             "caught. Add --clash-tun on to cover it")
+    if check.clash and config.clash_api is None:
+        if found is not None:
+            config.clash_api = found
+        else:
+            # 允许先设账号再设接口；启动时会失败并提示设置接口。
+            warn("the Clash controller is not set; launches of {} will be refused until you run "
+                 "`multi-grok clash-api auto` or `multi-grok clash-api ADDRESS`".format(account.name))
+    elif check.clash and found is not None:
+        # 查找期间另一条命令已经设好了接口：不覆盖，说明一句，免得以为已写入。
+        _find_note("a Clash controller was set meanwhile ({}); the one found is not used".format(
+            config.clash_api.address))
+
+
+def cmd_clash_api(args: argparse.Namespace) -> int:
+    """`clash-api [ADDRESS|auto|off]`：不带地址时只读显示；secret 只说有没有设置，不显示内容。
+
+    secret 只从标准输入读，不接受命令行参数（ps 能看到命令行参数）。auto 的查找不持锁，查完再读配置写入。
+    """
+    if args.address is None:
+        if args.secret_stdin:
+            error("--secret-stdin needs an ADDRESS")
+            return EXIT_USAGE
+        config, _exists = load_config()
+        if config.clash_api is None:
+            print("Clash controller is not set")
+        else:
+            print("Clash controller: {} (secret {})".format(
+                config.clash_api.address, "set" if config.clash_api.secret else "not set"))
+        return EXIT_OK
+    lowered = args.address.lower()
+    if lowered in ("auto", "off") and args.secret_stdin:
+        error("--secret-stdin cannot be used with {}".format(lowered))
+        return EXIT_USAGE
+    if lowered == "auto":
+        api, code = _find_clash(args.verbose, required=True)
+        if api is None:
+            return code
+    elif lowered == "off":
+        api = None
+    else:
+        try:
+            address = normalize_clash_address(args.address)
+        except ValueError as exc:
+            error(str(exc))
+            return EXIT_USAGE
+        secret = ""
+        if args.secret_stdin:
+            secret = sys.stdin.readline().rstrip("\r\n")
+            if not secret:
+                error("no secret was read from standard input")
+                return EXIT_USAGE
+        api = ClashApi(address, secret)
+    config, _exists = load_config()
+    config.clash_api = api
+    return _commit(config, args.dry_run, args.verbose)
+
+
+def _find_clash(verbose: bool, required: bool):
+    """找本机 Clash 接口，返回 (ClashApi 或 None, 找不到时调用方应返回的退出码)。说明写 stderr，不含 secret。"""
+    from . import clashfind
+    api, detail, notes = clashfind.find_controller()
+    if api is None:
+        if required:
+            error("no working Clash / mihomo controller found; is Clash running? Set one by hand with "
+                  "`multi-grok clash-api ADDRESS`")
+            for note in notes or ["no Clash / mihomo process or configuration file was found"]:
+                _find_note("  " + note, prefix=False)
+        elif verbose:
+            for note in notes:
+                _find_note("  " + note, prefix=False)
+        return None, EXIT_ERROR
+    if verbose:
+        for note in notes:
+            _find_note("  " + note, prefix=False)
+    _find_note("found Clash controller {} ({})".format(api.address, detail))
+    return api, EXIT_OK
+
+
+def _find_note(message: str, prefix: bool = True) -> None:
+    """查找过程的说明写 stderr：stdout 留给写命令的动作行。"""
+    sys.stdout.flush()
+    sys.stderr.write("{}{}\n".format("multi-grok: " if prefix else "", message))
+    sys.stderr.flush()
+
+
+def cmd_completion(args: argparse.Namespace) -> int:
     from .completion import render
-    sys.stdout.write(render(shell, _parser()))
+    if args.list_shared_items:
+        if args.shell is not None:
+            error("--list-shared-items takes no shell")
+            return EXIT_USAGE
+        # 补全过程中调用：配置读不了时什么都不输出，不把错误打到用户终端上。
+        try:
+            config, _exists = load_config()
+        except (ConfigError, OSError):
+            return EXIT_OK
+        for item in config.shared_items:
+            print(item)
+        return EXIT_OK
+    if args.shell is None:
+        error("completion needs bash, zsh or fish")
+        return EXIT_USAGE
+    sys.stdout.write(render(args.shell, _parser()))
     return EXIT_OK
 
 

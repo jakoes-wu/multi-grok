@@ -2,6 +2,12 @@
 
 [English](README.md) | **简体中文**
 
+[![Release](https://img.shields.io/github/v/release/jakoes-wu/multi-grok)](https://github.com/jakoes-wu/multi-grok/releases)
+[![CI](https://github.com/jakoes-wu/multi-grok/actions/workflows/ci.yml/badge.svg)](https://github.com/jakoes-wu/multi-grok/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
+
 在一台机器上同时使用多个 Grok 账号。每个账号有自己的登录、配置和会话，用 `grok-<账号名>` 启动。例如账号 `home` 的命令是 `grok-home`。
 
 本工具不读取、不复制、不打印 `auth.json` 的内容，也不修改 shell 启动文件。直接运行 `grok` 仍然使用原来的 `~/.grok`，不受影响。
@@ -36,7 +42,8 @@ Grok 在沙箱启动时拒绝符号链接形式的 `GROK_HOME`。账号目录必
 - 新建账号时写入一份受管的 `config.toml`，关掉对 `~/.claude` 和 `~/.cursor` 的兼容扫描。这两处路径不随 `GROK_HOME` 改变；不关掉的话，各账号仍会读到同一套 Claude / Cursor 技能和规则。已有的 `config.toml` 不会被覆盖。
 - 启动命令会清除 `XAI_API_KEY`、`GROK_CODE_XAI_API_KEY`、`GROK_AUTH`、`GROK_AUTH_PATH`、`GROK_CONFIG`、`GROK_CONFIG_PATH`。父 shell 里导出的这些变量不再串到别的账号上。直接运行 `grok` 不受影响。
 - 写操作可重复执行。和本工具无关的同名文件算冲突，这时什么都不写。`remove` 只注销账号并删除启动命令，不删除账号目录。
-- 可选的共享技能、按目录选择账号（`grok-auto`）、会话列表，以及把一个会话目录复制到另一个账号。见[日常命令](#日常命令)。
+- 可选的共享技能、按目录选择账号（`grok-auto`）、会话列表（也可写 `conversations`），以及把一个会话目录复制到另一个账号。见[日常命令](#日常命令)。
+- 可选的启动前网络检查：代理端口、Grok 服务器看到的国家、Clash 的 TUN / 全局模式。见[网络检查](#网络检查)。
 
 ## 环境
 
@@ -146,10 +153,12 @@ multi-grok args work -- --permission-mode acceptEdits
 | `sessions [<名称>] [--grep 文本] [--cmd] [--json]` | 只从 `summary.json` 列会话。不写名称时，`~/.grok` 会以 `default` 出现 |
 | `handoff <目标> [--from 名称] --session ID [--force]` | 复制一个会话目录。不改写 `summary.json` |
 | `export <名称> <文件>` / `import <文件> <名称> [--force]` | 打包或还原技能等共享目录。不含登录，不含会话 |
+| `netcheck <名称> [off\|basic\|strict] [--country CC] [--clash on\|off] [--clash-tun on\|off] [--clash-global on\|off]` | 查看或设置该账号的网络检查。不带设置时立即检查一次 |
+| `clash-api [auto \| off \| 地址 [--secret-stdin]]` | 查看、自动查找、清除或设置 Clash 检查用的本机 Clash 控制接口 |
 | `completion bash\|zsh\|fish` | 打印补全脚本。不改 shell 启动文件 |
 | `code <名称> [路径] -- [参数...]` | 实验性。单独的 VS Code 用户数据目录，加上该账号的环境 |
 
-写命令都接受 `--dry-run` 和 `--verbose`。退出码：`0` 成功，`1` 错误，`2` 用法错误，`3` 有冲突所以什么都没写，`4` 另一个 multi-grok 正在写配置。
+写命令都接受 `--dry-run` 和 `--verbose`。退出码：`0` 成功，`1` 错误，`2` 用法错误，`3` 有冲突所以什么都没写，`4` 另一个 multi-grok 正在写配置，`5` 网络检查未通过（账号没有启动，或 `netcheck <名称>` 查出了失败项）。
 
 示例配置见 [examples/config.example.json](examples/config.example.json)。
 
@@ -200,6 +209,43 @@ multi-grok handoff work --from home --session 会话ID
 multi-grok completion zsh
 ```
 
+补全也会给出固定取值：代理的 `off` / `inherit`、`netcheck` 的档位与 `on` / `off`、`usage --by day|model`、
+`clash-api auto|off`，以及 `--shared-include` / `--shared-exclude` 后面配置里的共享项名称。
+
+## 网络检查
+
+默认关闭。开启后，`grok-<名称>`、`grok-auto`、`multi-grok run`、`multi-grok login`、`multi-grok code`
+会先检查网络，任一项不通过就不启动账号（退出码 `5`）。`mcp` 和 `usage` 不检查。
+启动命令通过 `multi-grok` 做检查，所以 `multi-grok` 必须在 `PATH` 上，否则启动命令以 `127` 退出。
+
+```sh
+multi-grok proxy home 7890
+multi-grok netcheck home basic                  # 代理端口必须能连上
+multi-grok netcheck home strict --country US    # 再查直连与经代理访问时的国家
+multi-grok netcheck home --clash on             # Clash 必须开着 TUN 且处于全局模式
+multi-grok netcheck home                        # 立即检查一次并打印结果
+```
+
+| 设置 | 检查什么 |
+| ---- | ---- |
+| `basic` | 账号的代理端口在 3 秒内接受 TCP 连接。代理必须是地址或端口，不能是 `inherit` 或 `off` |
+| `strict` | 在 `basic` 之外，直连和经代理（http `CONNECT`）各读一次 `https://cli-chat-proxy.grok.com/cdn-cgi/trace`，两次的 `loc=` 都要等于 `--country`（默认 `US`）。这一档不支持 `https://` 代理 |
+| `--clash-tun on` | 本机 Clash（mihomo）控制接口报告 TUN 已开启，且模式不是 `direct` |
+| `--clash-global on` | 控制接口报告 `mode` 为 `global`。不开 TUN 时只管得到发往代理端口的流量 |
+
+`--clash on` 等于同时开两项 Clash 检查。它们与 `off` / `basic` / `strict` 互不影响。
+
+Clash 检查需要控制接口地址。没设置时，`netcheck ... --clash on` 会自动查找，`multi-grok clash-api auto` 也会。
+它读取正在运行的 Clash / mihomo 进程的命令行、这些进程用 `-f` / `-d` 指定的配置文件，在 macOS 上还读 Clash Verge 的配置，
+取第一个 `GET /configs` 能返回模式和 TUN 状态的本机地址。
+也可以手动设置：`multi-grok clash-api 127.0.0.1:9097`，加 `--secret-stdin` 从标准输入读密钥。
+密钥存在 `config.json`（权限 `0600`）里，不会打印。
+
+跳过一次：`MULTI_GROK_SKIP_NETCHECK=1 grok-home`。关闭：`multi-grok netcheck home off --clash off`。
+
+检查只测 Grok 周围的网络。Grok 的各个部分是否真的都经过代理，尚未验证。
+0.4.0 写入了网络检查或 Clash 控制接口的 `config.json`，0.3.0 读取时会报未知键。
+
 ## 不做的事
 
 - 不移动 `~/.grok`，也不把它换成软链。沙箱拒绝软链形式的 `GROK_HOME`。
@@ -213,7 +259,7 @@ multi-grok completion zsh
 python3 -m unittest discover -s tests -v
 ```
 
-方案说明在 [docs/feature/feature-account-manager.md](docs/feature/feature-account-manager.md)、[docs/feature/feature-everyday-commands.md](docs/feature/feature-everyday-commands.md) 和 [docs/feature/feature-help-examples.md](docs/feature/feature-help-examples.md)。
+方案说明在 [docs/feature/feature-account-manager.md](docs/feature/feature-account-manager.md)、[docs/feature/feature-everyday-commands.md](docs/feature/feature-everyday-commands.md)、[docs/feature/feature-help-examples.md](docs/feature/feature-help-examples.md)、[docs/feature/feature-network-check.md](docs/feature/feature-network-check.md) 和 [docs/feature/feature-completion-values.md](docs/feature/feature-completion-values.md)。
 
 ## 许可
 

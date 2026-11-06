@@ -1,6 +1,12 @@
 # multi-grok
 
-**English** | [简体中文](README.zh-CN.md)
+**English** | [简体中文](https://github.com/jakoes-wu/multi-grok/blob/main/README.zh-CN.md)
+
+[![Release](https://img.shields.io/github/v/release/jakoes-wu/multi-grok)](https://github.com/jakoes-wu/multi-grok/releases)
+[![CI](https://github.com/jakoes-wu/multi-grok/actions/workflows/ci.yml/badge.svg)](https://github.com/jakoes-wu/multi-grok/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/jakoes-wu/multi-grok/blob/main/LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
 
 Use several Grok accounts on one machine at the same time. Each account keeps its own login, settings and sessions. Start one with `grok-<name>`. The account named `home` is started with `grok-home`.
 
@@ -36,7 +42,8 @@ Grok refuses a symlinked `GROK_HOME` when the sandbox starts. Account directorie
 - A new account gets a managed `config.toml` that turns off the Claude and Cursor compatibility scans. Those scans read `~/.claude` and `~/.cursor`, which do not follow `GROK_HOME`. An existing `config.toml` is left untouched.
 - Launchers unset `XAI_API_KEY`, `GROK_CODE_XAI_API_KEY`, `GROK_AUTH`, `GROK_AUTH_PATH`, `GROK_CONFIG` and `GROK_CONFIG_PATH`, so a key exported in the parent shell is not shared across accounts. Running `grok` directly is unchanged.
 - Write commands are safe to re-run. A same-named file that multi-grok does not own is a conflict, and then nothing is written. `remove` unregisters the account and deletes the launcher. It does not delete the directory.
-- Optional shared skills and commands, directory routing (`grok-auto`), session listing, and a copy of one session directory into another account. See [Everyday commands](#everyday-commands).
+- Optional shared skills and commands, directory routing (`grok-auto`), session listing (also `conversations`), and a copy of one session directory into another account. See [Everyday commands](#everyday-commands).
+- An optional network check before an account starts: the proxy port, the country seen by Grok's servers, and Clash TUN / global mode. See [Network check](#network-check).
 
 ## Prerequisites
 
@@ -146,12 +153,14 @@ A login that already exists in `~/.grok` does not show up in `grok-home`. `home`
 | `sessions [<name>] [--grep TEXT] [--cmd] [--json]` | List sessions from `summary.json` only. With no name, `~/.grok` is included as `default`. |
 | `handoff <target> [--from NAME] --session ID [--force]` | Copy one session directory. It does not rewrite `summary.json`. |
 | `export <name> <file>` / `import <file> <name> [--force]` | Pack or unpack skills and the other shared directories. No login, no sessions. |
+| `netcheck <name> [off\|basic\|strict] [--country CC] [--clash on\|off] [--clash-tun on\|off] [--clash-global on\|off]` | Show or set the network check for an account. With no setting, run the checks once. |
+| `clash-api [auto \| off \| ADDRESS [--secret-stdin]]` | Show, find, clear or set the local Clash controller used by the Clash checks. |
 | `completion bash\|zsh\|fish` | Print a completion script. Nothing is written to your shell startup file. |
 | `code <name> [path] -- [args...]` | Experimental. Separate VS Code user data, plus this account's environment. |
 
-Write commands accept `--dry-run` and `--verbose`. Exit codes: `0` success, `1` error, `2` bad usage, `3` conflict (nothing written), `4` another multi-grok process holds the write lock.
+Write commands accept `--dry-run` and `--verbose`. Exit codes: `0` success, `1` error, `2` bad usage, `3` conflict (nothing written), `4` another multi-grok process holds the write lock, `5` a network check failed (the account was not started, or `netcheck <name>` found a failure).
 
-See [examples/config.example.json](examples/config.example.json).
+See [examples/config.example.json](https://github.com/jakoes-wu/multi-grok/blob/main/examples/config.example.json).
 
 ```sh
 multi-grok apply -f examples/config.example.json
@@ -200,6 +209,42 @@ Shell completion, printed only:
 multi-grok completion zsh
 ```
 
+Completion also offers fixed values: proxy `off` / `inherit`, `netcheck` levels and `on` / `off`, `usage --by day|model`,
+`clash-api auto|off`, and the shared item names from your config for `--shared-include` / `--shared-exclude`.
+
+## Network check
+
+Off by default. When it is on, `grok-<name>`, `grok-auto`, `multi-grok run`, `multi-grok login` and `multi-grok code`
+check the network first and refuse to start the account if a check fails (exit code `5`). `mcp` and `usage` are not checked.
+The launcher runs the check through `multi-grok`, so `multi-grok` must be on `PATH`; otherwise the launcher exits with `127`.
+
+```sh
+multi-grok proxy home 7890
+multi-grok netcheck home basic                  # the proxy port must accept a connection
+multi-grok netcheck home strict --country US    # also check the country, direct and through the proxy
+multi-grok netcheck home --clash on             # Clash must have TUN on and be in global mode
+multi-grok netcheck home                        # run the checks once and print the result
+```
+
+| Setting | What is checked |
+| ---- | ---- |
+| `basic` | The account proxy port accepts a TCP connection within 3 seconds. The proxy must be a URL or a port, not `inherit` or `off`. |
+| `strict` | `basic`, plus `https://cli-chat-proxy.grok.com/cdn-cgi/trace` read directly and through the proxy (http `CONNECT`); both `loc=` values must equal `--country` (default `US`). An `https://` proxy is not supported here. |
+| `--clash-tun on` | The local Clash (mihomo) controller reports TUN enabled, and the mode is not `direct`. |
+| `--clash-global on` | The controller reports `mode` `global`. Without TUN this only covers traffic sent to the proxy port. |
+
+`--clash on` is both Clash items. They are independent of `off` / `basic` / `strict`.
+
+The Clash checks need the controller address. `netcheck ... --clash on` looks for it when none is set, and so does
+`multi-grok clash-api auto`. It reads the command lines of running Clash / mihomo processes, the config files they name with `-f` / `-d`, and,
+on macOS, the Clash Verge config. It keeps the first local address whose `GET /configs` returns the mode and TUN state. Set one by hand with `multi-grok clash-api 127.0.0.1:9097`.
+Add `--secret-stdin` to read the secret from standard input. The secret is stored in `config.json` (mode `0600`) and never printed.
+
+Skip once: `MULTI_GROK_SKIP_NETCHECK=1 grok-home`. Turn off: `multi-grok netcheck home off --clash off`.
+
+The check only tests the network around Grok. Whether every part of Grok really sends its traffic through the proxy has not been verified.
+`config.json` written by 0.4.0 with a network check or a Clash controller is rejected by 0.3.0 as unknown keys.
+
 ## What this does not do
 
 - It does not move `~/.grok` or replace it with a symlink. The sandbox refuses a symlinked `GROK_HOME`.
@@ -213,8 +258,8 @@ multi-grok completion zsh
 python3 -m unittest discover -s tests -v
 ```
 
-Design notes: [docs/feature/feature-account-manager.md](docs/feature/feature-account-manager.md), [docs/feature/feature-everyday-commands.md](docs/feature/feature-everyday-commands.md), and [docs/feature/feature-help-examples.md](docs/feature/feature-help-examples.md).
+Design notes: [docs/feature/feature-account-manager.md](https://github.com/jakoes-wu/multi-grok/blob/main/docs/feature/feature-account-manager.md), [docs/feature/feature-everyday-commands.md](https://github.com/jakoes-wu/multi-grok/blob/main/docs/feature/feature-everyday-commands.md), [docs/feature/feature-help-examples.md](https://github.com/jakoes-wu/multi-grok/blob/main/docs/feature/feature-help-examples.md), [docs/feature/feature-network-check.md](https://github.com/jakoes-wu/multi-grok/blob/main/docs/feature/feature-network-check.md), and [docs/feature/feature-completion-values.md](https://github.com/jakoes-wu/multi-grok/blob/main/docs/feature/feature-completion-values.md).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/jakoes-wu/multi-grok/blob/main/LICENSE)

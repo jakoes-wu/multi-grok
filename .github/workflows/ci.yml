@@ -6,10 +6,17 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        python: ["3.11", "3.12"]
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.12"
+          # pyproject.toml 声明 >=3.8；3.8 放在 22.04 上跑（新版 Ubuntu 上 setup-python 是否还提供 3.8 未核实）。
+          - os: ubuntu-22.04
+            python: "3.8"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -17,3 +24,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
+      # README.md 也是对外的项目页，相对链接在 GitHub 以外的地方打不开。
+      - name: README links
+        run: |
+          if grep -noE '\]\([^)]+\)' README.md | grep -vE '\]\((https?://|#)'; then
+            echo 'README.md has relative links; use https://github.com/jakoes-wu/multi-grok/blob/main/... instead'; exit 1
+          fi

@@ -3,6 +3,7 @@ import subprocess
 import unittest
 
 import helpers
+from multi_grok import __version__
 
 
 class InstallTest(unittest.TestCase):
@@ -21,7 +22,7 @@ class InstallTest(unittest.TestCase):
             version = subprocess.run([wrapper, "--version"], check=False,
                                      stdout=subprocess.PIPE, text=True)
             self.assertEqual(version.returncode, 0, version.stdout)
-            self.assertIn("multi-grok 0.3.0", version.stdout)
+            self.assertIn("multi-grok " + __version__, version.stdout)
             again = subprocess.run([script, "--prefix", prefix], check=False,
                                    stdout=subprocess.PIPE, text=True)
             self.assertEqual(again.returncode, 0, again.stdout)

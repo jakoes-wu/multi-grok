@@ -27,6 +27,16 @@ PROXY_SCHEMES = ("http", "https")
 PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
               "https_proxy", "http_proxy", "all_proxy", "no_proxy")
 
+# 启动前网络检查的档位（docs/feature/feature-network-check.md §5.1.1）。
+NET_CHECK_LEVELS = ("off", "basic", "strict")
+# 本次跳过网络检查的环境变量。放在 config 而不是 netcheck：launcher 生成检查段时要用到它，
+# 但不应为此导入联网模块（http.client、ssl），未开启检查的账号启动时不多付导入开销。
+NETCHECK_SKIP_ENV = "MULTI_GROK_SKIP_NETCHECK"
+DEFAULT_COUNTRY = "US"
+COUNTRY_PATTERN = re.compile(r"^[A-Za-z]{2}$")
+# mihomo 的命名管道地址前缀。本轮只支持 macOS / Linux，识别出来是为了给出明确的“仅 Windows”报错。
+PIPE_PREFIX = "\\\\.\\pipe\\"
+
 # 这些键决定“用哪一套目录 / 哪一份登录”。写进启动命令会把账号隔离悄悄拆掉。
 _IDENTITY_KEYS = ("GROK_HOME", "GROK_AUTH", "GROK_AUTH_PATH", "GROK_CONFIG", "GROK_CONFIG_PATH",
                   "HOME", "USER")
@@ -48,13 +58,70 @@ class RouteRule(object):
         return RouteRule(self.path, self.account)
 
 
+class NetCheck(object):
+    """账号的启动前网络检查设置。
+
+    level：off 不检查代理；basic 只要求账号代理端口能连通；strict 另要求直连与经代理访问
+    cli-chat-proxy.grok.com/cdn-cgi/trace 得到的 loc 都等于 country。
+    clash_tun：要求 Clash / mihomo 的 TUN 已开启且不是 direct 模式（direct 下 TUN 接住的流量照样直连）；
+    clash_global：要求 Clash / mihomo 为全局模式。两项与 level 相互独立。
+    country 在非 strict 档位也保存，切到 strict 时生效。
+    """
+
+    def __init__(self, level: str = "off", country: str = DEFAULT_COUNTRY, clash_tun: bool = False,
+                 clash_global: bool = False) -> None:
+        self.level = level
+        self.country = country
+        self.clash_tun = clash_tun
+        self.clash_global = clash_global
+
+    @property
+    def clash(self) -> bool:
+        """是否开启了任一项 Clash 检查。"""
+        return self.clash_tun or self.clash_global
+
+    @property
+    def active(self) -> bool:
+        """是否需要在启动前检查；为假时启动命令与 config.json 都与 0.3.0 逐字节相同。"""
+        return self.level != "off" or self.clash
+
+    def copy(self) -> "NetCheck":
+        return NetCheck(self.level, self.country, self.clash_tun, self.clash_global)
+
+    def to_dict(self) -> dict:
+        return {"level": self.level, "country": self.country, "clash_tun": self.clash_tun,
+                "clash_global": self.clash_global}
+
+
+class ClashApi(object):
+    """Clash / mihomo 外部控制接口，是这台机器的设置（apply -f 不从文件里取）。
+
+    address 已规范化为 `http://HOST:PORT` 或 `unix:/绝对路径`。secret 只用于 TCP 形态
+    （mihomo 的 unix 套接字不鉴权），空字符串表示不带；它存在 0600 的 config.json 里，不打印。
+    """
+
+    def __init__(self, address: str, secret: str = "") -> None:
+        self.address = address
+        self.secret = secret
+
+    def copy(self) -> "ClashApi":
+        return ClashApi(self.address, self.secret)
+
+    def to_dict(self) -> dict:
+        data = {"address": self.address}
+        if self.secret:
+            data["secret"] = self.secret
+        return data
+
+
 class Account(object):
     """一个已登记的账号。改名只改启动命令，目录名留在 dir 里。"""
 
     def __init__(self, name: str, proxy: str = PROXY_INHERIT, isolate: bool = True,
                  env: Optional[Dict[str, str]] = None, args: Optional[List[str]] = None,
                  shared: bool = False, shared_exclude: Optional[List[str]] = None,
-                 managed_links: Optional[List[str]] = None, directory: Optional[str] = None) -> None:
+                 managed_links: Optional[List[str]] = None, directory: Optional[str] = None,
+                 net_check: Optional[NetCheck] = None) -> None:
         self.name = name
         self.proxy = proxy
         self.isolate = isolate
@@ -64,10 +131,12 @@ class Account(object):
         self.shared_exclude = list(shared_exclude or [])
         self.managed_links = list(managed_links or [])
         self.dir = directory or name
+        self.net_check = net_check.copy() if net_check is not None else NetCheck()
 
     def copy(self) -> "Account":
         return Account(self.name, self.proxy, self.isolate, dict(self.env), list(self.args),
-                       self.shared, list(self.shared_exclude), list(self.managed_links), self.dir)
+                       self.shared, list(self.shared_exclude), list(self.managed_links), self.dir,
+                       self.net_check)
 
     def to_dict(self) -> dict:
         # 缺省字段不写回去。0.1 的 config.json 在没有这些字段时，doctor 才不会把它们当成漂移。
@@ -81,6 +150,9 @@ class Account(object):
             data["managed_links"] = list(self.managed_links)
         if self.dir != self.name:
             data["dir"] = self.dir
+        # 未开启时不写，旧账号的 config.json 不因升级而变化。
+        if self.net_check.active:
+            data["net_check"] = self.net_check.to_dict()
         return data
 
 
@@ -91,7 +163,8 @@ class Config(object):
                  shared_dir: Optional[str] = None,
                  shared_items: Optional[List[str]] = None,
                  route_rules: Optional[List[RouteRule]] = None,
-                 route_default: Optional[str] = None) -> None:
+                 route_default: Optional[str] = None,
+                 clash_api: Optional[ClashApi] = None) -> None:
         self.root = root
         self.bin_dir = bin_dir
         self.accounts = accounts
@@ -101,6 +174,7 @@ class Config(object):
         self.shared_items = list(DEFAULT_SHARED_ITEMS if shared_items is None else shared_items)
         self.route_rules = list(route_rules or [])
         self.route_default = route_default
+        self.clash_api = clash_api
 
     def routes_enabled(self) -> bool:
         return bool(self.route_rules) or self.route_default is not None
@@ -128,7 +202,8 @@ class Config(object):
                       {key: value.copy() for key, value in self.accounts.items()},
                       dict(self.defaults_env), list(self.defaults_args),
                       self.shared_dir, list(self.shared_items),
-                      [rule.copy() for rule in self.route_rules], self.route_default)
+                      [rule.copy() for rule in self.route_rules], self.route_default,
+                      self.clash_api.copy() if self.clash_api is not None else None)
 
     def to_dict(self) -> dict:
         data = {
@@ -150,6 +225,8 @@ class Config(object):
                 "default": self.route_default,
                 "rules": [{"path": rule.path, "account": rule.account} for rule in self.route_rules],
             }
+        if self.clash_api is not None:
+            data["clash_api"] = self.clash_api.to_dict()
         return data
 
 
@@ -189,7 +266,8 @@ def parse_config(raw: str, source: str) -> Config:
         raise ConfigError("{} is not valid JSON: {}".format(source, exc))
     if not isinstance(data, dict):
         raise ConfigError("{} must be a JSON object".format(source))
-    unknown = set(data) - {"version", "root", "bin_dir", "defaults", "accounts", "shared", "routes"}
+    unknown = set(data) - {"version", "root", "bin_dir", "defaults", "accounts", "shared", "routes",
+                         "clash_api"}
     if unknown:
         raise ConfigError("{} has unknown keys: {}".format(source, ", ".join(sorted(unknown))))
     version = data.get("version", CONFIG_VERSION)
@@ -234,8 +312,9 @@ def parse_config(raw: str, source: str) -> Config:
         dirs[account.dir.casefold()] = account.name
     shared_dir, shared_items = _parse_shared(data.get("shared", {}), source)
     route_rules, route_default = _parse_routes(data.get("routes", {}), accounts, source)
+    clash_api = _parse_clash_api(data.get("clash_api"), source)
     return Config(root, bin_dir, accounts, defaults_env, defaults_args,
-                  shared_dir, shared_items, route_rules, route_default)
+                  shared_dir, shared_items, route_rules, route_default, clash_api)
 
 
 def _parse_account(name: str, body: object, source: str) -> Account:
@@ -243,7 +322,7 @@ def _parse_account(name: str, body: object, source: str) -> Account:
     if not isinstance(body, dict):
         raise ConfigError("{} must be an object".format(where))
     unknown = set(body) - {"proxy", "isolate", "env", "args", "shared", "shared_exclude",
-                           "managed_links", "dir"}
+                           "managed_links", "dir", "net_check"}
     if unknown:
         raise ConfigError("{} has unknown keys: {}".format(where, ", ".join(sorted(unknown))))
     try:
@@ -268,7 +347,8 @@ def _parse_account(name: str, body: object, source: str) -> Account:
             validate_dir_name(directory)
         except ValueError as exc:
             raise ConfigError("{}: {}".format(where, exc))
-    return Account(name, proxy, isolate, env, args, shared, shared_exclude, managed_links, directory)
+    net_check = _parse_net_check(body.get("net_check"), where)
+    return Account(name, proxy, isolate, env, args, shared, shared_exclude, managed_links, directory, net_check)
 
 
 def _parse_env(value: object, where: str) -> Dict[str, str]:
@@ -385,6 +465,95 @@ def normalize_proxy(value: object) -> str:
 def _check_port(port: int) -> None:
     if not 1 <= port <= 65535:
         raise ValueError("proxy port must be between 1 and 65535, got {}".format(port))
+
+
+def normalize_country(value: object) -> str:
+    """两位字母国家代码，存大写。"""
+    if not isinstance(value, str) or not COUNTRY_PATTERN.match(value):
+        raise ValueError("invalid country {!r}: use a two-letter code such as US".format(value))
+    return value.upper()
+
+
+def normalize_clash_address(value: object) -> str:
+    """把 Clash 接口地址规范化为 `http://HOST:PORT` 或 `unix:/绝对路径`。
+
+    写成 HOST:PORT 时补 http://。带路径、用户名或其它 scheme 的拒绝：secret 只经 --secret-stdin 传入，
+    不能藏在地址里（地址会被打印）。
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError("Clash controller address must be a non-empty string")
+    if value.startswith("pipe:") or value.lower().startswith(PIPE_PREFIX):
+        raise ValueError("named pipe addresses are only supported on Windows")
+    if value.startswith("unix:"):
+        path = value[len("unix:"):]
+        if not os.path.isabs(path):
+            raise ValueError("unix socket address must be an absolute path, e.g. unix:/tmp/mihomo.sock")
+        return "unix:" + path
+    if "://" not in value:
+        value = "http://" + value
+    parts = urllib.parse.urlsplit(value)
+    if parts.scheme != "http":
+        raise ValueError("unsupported Clash controller scheme {!r}; use HOST:PORT, http://HOST:PORT "
+                         "or unix:/PATH".format(parts.scheme))
+    if parts.username is not None or parts.password is not None or parts.path not in ("", "/") \
+            or parts.query or parts.fragment:
+        raise ValueError("Clash controller address must be HOST:PORT without a path; "
+                         "pass the secret with --secret-stdin")
+    host = parts.hostname
+    try:
+        port = parts.port
+    except ValueError:
+        raise ValueError("Clash controller address has an invalid port")
+    if not host or port is None:
+        raise ValueError("Clash controller address must contain a host and a port")
+    if not 1 <= port <= 65535:
+        raise ValueError("Clash controller port must be between 1 and 65535, got {}".format(port))
+    if ":" in host:
+        host = "[{}]".format(host)
+    return "http://{}:{}".format(host, port)
+
+
+def _parse_net_check(value: object, where: str) -> NetCheck:
+    """解析账号的 net_check。子键与顶层、账号一样严格：未知子键（含 multi-codex 旧写法 clash）报错。"""
+    if value is None:
+        return NetCheck()
+    if not isinstance(value, dict):
+        raise ConfigError("{} field net_check must be an object".format(where))
+    unknown = set(value) - {"level", "country", "clash_tun", "clash_global"}
+    if unknown:
+        raise ConfigError("{} net_check has unknown keys: {}".format(where, ", ".join(sorted(unknown))))
+    level = value.get("level", "off")
+    if level not in NET_CHECK_LEVELS:
+        raise ConfigError("{} field net_check.level must be one of {}".format(where, ", ".join(NET_CHECK_LEVELS)))
+    try:
+        country = normalize_country(value.get("country", DEFAULT_COUNTRY))
+    except ValueError as exc:
+        raise ConfigError("{} field net_check.country: {}".format(where, exc))
+    flags = []
+    for key in ("clash_tun", "clash_global"):
+        flag = value.get(key, False)
+        if not isinstance(flag, bool):
+            raise ConfigError("{} field net_check.{} must be true or false".format(where, key))
+        flags.append(flag)
+    return NetCheck(level, country, flags[0], flags[1])
+
+
+def _parse_clash_api(value: object, source: str) -> Optional[ClashApi]:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError("{} field clash_api must be an object".format(source))
+    unknown = set(value) - {"address", "secret"}
+    if unknown:
+        raise ConfigError("{} clash_api has unknown keys: {}".format(source, ", ".join(sorted(unknown))))
+    try:
+        address = normalize_clash_address(value.get("address"))
+    except ValueError as exc:
+        raise ConfigError("{} field clash_api.address: {}".format(source, exc))
+    secret = value.get("secret", "")
+    if not isinstance(secret, str) or "\n" in secret or "\r" in secret:
+        raise ConfigError("{} field clash_api.secret must be a single-line string".format(source))
+    return ClashApi(address, secret)
 
 
 def account_dir(config: Config, name: str) -> str:

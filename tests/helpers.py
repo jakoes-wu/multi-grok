@@ -20,12 +20,15 @@ def isolated_home():
     bin_dir = os.path.join(home, ".local", "bin")
     os.makedirs(bin_dir)
     os.makedirs(xdg)
-    keys = ["HOME", "XDG_CONFIG_HOME", "PATH", "MULTI_GROK_TEST_OUTPUT"] + list(ISOLATION_ENV)
+    keys = ["HOME", "XDG_CONFIG_HOME", "PATH", "MULTI_GROK_TEST_OUTPUT", "MULTI_GROK_SKIP_NETCHECK",
+            "MULTI_GROK_TEST_TRACE", "MULTI_GROK_TEST_CA", "MULTI_GROK_TEST_CLASH_PROCESSES",
+            "MULTI_GROK_TEST_CLASH_CONFIGS"] + list(ISOLATION_ENV)
     saved = {key: os.environ.get(key) for key in keys}
     os.environ["HOME"] = home
     os.environ["XDG_CONFIG_HOME"] = xdg
     os.environ["PATH"] = bin_dir + os.pathsep + saved["PATH"] if saved["PATH"] else bin_dir
-    for key in ISOLATION_ENV:
+    for key in keys[4:]:
+        # 跳过变量与测试注入变量一律从干净状态开始；外层 shell 里设过也不影响用例。
         os.environ.pop(key, None)
     try:
         yield {"tmp": tmp, "home": home, "xdg": xdg, "bin": bin_dir}

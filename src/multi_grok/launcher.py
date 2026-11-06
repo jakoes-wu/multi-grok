@@ -12,7 +12,7 @@ import os
 import shlex
 from typing import Dict, List, Optional
 
-from .config import PROXY_INHERIT, PROXY_OFF, PROXY_VARS
+from .config import NETCHECK_SKIP_ENV, PROXY_INHERIT, PROXY_OFF, PROXY_VARS
 from .fsutil import KIND_FILE, entry_kind, expand, is_under, read_text
 from .platform import ISOLATION_ENV
 
@@ -58,8 +58,13 @@ def shell_account_dir(root: str, name: str) -> str:
     return shlex.quote(account_abs)
 
 
-def render(name: str, root: str, proxy: str, env: Dict[str, str], args: List[str]) -> str:
-    """生成 POSIX sh 启动命令。插进脚本的值都经过 shlex.quote，账号目录表达式除外（它自己已加引号）。"""
+def render(name: str, root: str, proxy: str, env: Dict[str, str], args: List[str], *,
+           net_check: bool = False) -> str:
+    """生成 POSIX sh 启动命令。插进脚本的值都经过 shlex.quote，账号目录表达式除外（它自己已加引号）。
+
+    net_check 为真时在目录检查之后插入网络检查段（docs/feature/feature-network-check.md §5.1.3）；
+    为假时输出与 0.3.0 逐字节相同，未开启检查的账号启动命令不会被判成“已变化”。
+    """
     lines = [
         "#!/bin/sh",
         MARKER_PREFIX + name,
@@ -74,11 +79,15 @@ def render(name: str, root: str, proxy: str, env: Dict[str, str], args: List[str
         "  printf 'multi-grok: account directory does not exist: %s\\n' \"$account_dir\" >&2",
         "  exit 1",
         "fi",
+    ]
+    if net_check:
+        lines.extend(_net_check_lines(name))
+    lines.extend([
         'GROK_HOME="$account_dir"',
         "export GROK_HOME",
         # 父 shell 里导出的钥匙会让没登录的账号共用同一份凭据，或把登录指到别的文件。
         "unset " + " ".join(ISOLATION_ENV),
-    ]
+    ])
     for key in sorted(env):
         lines.append("{}={}; export {}".format(key, shlex.quote(expand_value(env[key])), key))
     lines.extend(_proxy_lines(proxy))
@@ -92,6 +101,23 @@ def render(name: str, root: str, proxy: str, env: Dict[str, str], args: List[str
         "",
     ])
     return "\n".join(lines)
+
+
+def _net_check_lines(name: str) -> List[str]:
+    """启动前网络检查段：检查不通过时以 multi-grok 的退出码（5）退出，grok 不会运行。
+
+    在子 shell 里先 `cd /` 再运行：multi-grok 包装用 `python -m` 启动（install.sh），在用户项目目录里运行时
+    项目里的 json.py、ssl.py 会顶替标准库。切目录只在子 shell 里生效，grok 仍在用户当前目录启动。
+    检查跑在子进程里，删不掉本 shell 的跳过变量，所以通过后由这里 unset，grok 及其子进程不会继承“跳过”。
+    """
+    return [
+        "if ! command -v multi-grok >/dev/null 2>&1; then",
+        "  echo 'multi-grok: multi-grok not found in PATH; it runs the network check of this account' >&2",
+        "  exit 127",
+        "fi",
+        "(cd / && exec multi-grok netgate {}) || exit $?".format(shlex.quote(name)),
+        "unset " + NETCHECK_SKIP_ENV,
+    ]
 
 
 def _proxy_lines(proxy: str) -> List[str]:

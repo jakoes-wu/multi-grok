@@ -181,7 +181,7 @@ def _launcher_action(config: Config, name: str) -> Action:
     account = config.accounts[name]
     path = launcher_path(config.bin_dir, name)
     expected = render(name, config.root, account.proxy, config.effective_env(account),
-                      config.effective_args(account))
+                      config.effective_args(account), net_check=account.net_check.active)
     kind = entry_kind(path)
     if kind == KIND_MISSING:
         return Action(CREATE, "launcher", path, run=_write_launcher(path, expected))
@@ -281,7 +281,7 @@ def _launcher_state(config: Config, name: str, path: str) -> str:
         return "conflict"
     account = config.accounts[name]
     expected = render(name, config.root, account.proxy, config.effective_env(account),
-                      config.effective_args(account))
+                      config.effective_args(account), net_check=account.net_check.active)
     current = read_text(path)
     if current == expected:
         return "ok"
