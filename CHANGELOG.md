@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- README: how to load completion in zsh, bash and fish.
+
 ## 0.4.0
 
 Network check before an account starts, Clash checks, and completion values. macOS and Linux only; Windows comes later.

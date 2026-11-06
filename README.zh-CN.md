@@ -203,11 +203,18 @@ multi-grok handoff work --from home --session 会话ID
 
 `usage --history` 对每个会话调用一次 `grok usage`，只加总数字，不打印对话。工作目录保持不变。用户指南没有写 `grok usage` 是否只看当前目录。
 
-补全脚本只打印，不写入启动文件：
+补全脚本只打印，不写入启动文件。要让每个新终端都加载补全，自己加一行：
 
 ```sh
-multi-grok completion zsh
+# ~/.zshrc，放在 compinit 之后
+command -v multi-grok >/dev/null 2>&1 && eval "$(multi-grok completion zsh)"
+# ~/.bashrc
+command -v multi-grok >/dev/null 2>&1 && eval "$(multi-grok completion bash)"
+# ~/.config/fish/config.fish
+command -q multi-grok; and multi-grok completion fish | source
 ```
+
+加好后新开一个终端（或运行 `exec zsh`）。zsh 的补全脚本要调用 `compdef`，所以 `compinit` 必须先运行。
 
 补全也会给出固定取值：代理的 `off` / `inherit`、`netcheck` 的档位与 `on` / `off`、`usage --by day|model`、
 `clash-api auto|off`，以及 `--shared-include` / `--shared-exclude` 后面配置里的共享项名称。

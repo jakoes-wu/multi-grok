@@ -203,11 +203,18 @@ multi-grok handoff work --from home --session SESSION_ID
 
 `usage --history` calls `grok usage` once per session and adds up the numbers. It does not print the conversation. The working directory is left as it is. The user guide does not say whether `grok usage` only sees the current directory.
 
-Shell completion, printed only:
+Shell completion. multi-grok only prints the script; to load it in every new shell, add one line yourself:
 
 ```sh
-multi-grok completion zsh
+# ~/.zshrc, after compinit
+command -v multi-grok >/dev/null 2>&1 && eval "$(multi-grok completion zsh)"
+# ~/.bashrc
+command -v multi-grok >/dev/null 2>&1 && eval "$(multi-grok completion bash)"
+# ~/.config/fish/config.fish
+command -q multi-grok; and multi-grok completion fish | source
 ```
+
+Open a new terminal (or run `exec zsh`) afterwards. The zsh script calls `compdef`, so `compinit` must run first.
 
 Completion also offers fixed values: proxy `off` / `inherit`, `netcheck` levels and `on` / `off`, `usage --by day|model`,
 `clash-api auto|off`, and the shared item names from your config for `--shared-include` / `--shared-exclude`.
